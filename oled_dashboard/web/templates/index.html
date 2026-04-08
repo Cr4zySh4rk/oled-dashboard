@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OLED Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+    <!-- Top Nav -->
+    <header class="topbar">
+        <div class="topbar-brand">
+            <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+                <line x1="8" y1="21" x2="16" y2="21"/>
+                <line x1="12" y1="17" x2="12" y2="21"/>
+            </svg>
+            <span class="brand-text">OLED Dashboard</span>
+            <span class="version-badge">v1.0.0</span>
+        </div>
+        <div class="topbar-actions">
+            <div class="status-indicator" id="statusIndicator">
+                <span class="status-dot"></span>
+                <span class="status-text">Connecting...</span>
+            </div>
+            <button class="btn btn-sm btn-ghost" id="btnRefreshPreview" title="Refresh Preview">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                    <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
+                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                </svg>
+            </button>
+            <button class="btn btn-sm btn-primary" id="btnSaveLayout">Save Layout</button>
+        </div>
+    </header>
+
+    <div class="app-container">
+        <!-- Left Sidebar: Widget Palette -->
+        <aside class="sidebar sidebar-left" id="widgetPalette">
+            <div class="sidebar-header">
+                <h3>Widgets</h3>
+                <input type="text" class="search-input" id="widgetSearch" placeholder="Search widgets...">
+            </div>
+            <div class="widget-categories" id="widgetCategories">
+                <!-- Populated by JS -->
+            </div>
+        </aside>
+
+        <!-- Center: Display Canvas -->
+        <main class="canvas-area">
+            <div class="canvas-toolbar">
+                <div class="toolbar-group">
+                    <label>Display:</label>
+                    <select id="selDisplay" class="form-select">
+                        <!-- Populated by JS -->
+                    </select>
+                </div>
+                <div class="toolbar-group">
+                    <label>Rotation:</label>
+                    <select id="selRotation" class="form-select">
+                        <option value="0">0°</option>
+                        <option value="90">90°</option>
+                        <option value="180">180°</option>
+                        <option value="270">270°</option>
+                    </select>
+                </div>
+                <div class="toolbar-group">
+                    <label>Interface:</label>
+                    <select id="selInterface" class="form-select">
+                        <option value="i2c">I2C</option>
+                        <option value="spi">SPI</option>
+                    </select>
+                </div>
+                <div class="toolbar-group">
+                    <label>Brightness:</label>
+                    <input type="range" id="sliderBrightness" min="0" max="255" value="255" class="form-range">
+                </div>
+                <div class="toolbar-group">
+                    <button class="btn btn-sm btn-ghost btn-danger" id="btnClearAll" title="Clear All Widgets">Clear All</button>
+                </div>
+            </div>
+
+            <!-- The OLED simulation canvas -->
+            <div class="display-wrapper" id="displayWrapper">
+                <div class="display-frame" id="displayFrame">
+                    <canvas id="oledCanvas"></canvas>
+                    <!-- Widget overlay for drag-and-drop -->
+                    <div class="widget-overlay" id="widgetOverlay">
+                        <!-- Placed widgets rendered here -->
+                    </div>
+                    <!-- Grid overlay -->
+                    <div class="grid-overlay" id="gridOverlay"></div>
+                </div>
+                <div class="display-info">
+                    <span id="displayResolution">128 x 64</span>
+                    <span id="displayChip">SSD1306</span>
+                </div>
+            </div>
+
+            <!-- Live preview -->
+            <div class="preview-section">
+                <div class="preview-header">
+                    <h4>Live Preview</h4>
+                    <label class="toggle-label">
+                        <input type="checkbox" id="chkAutoPreview" checked>
+                        Auto-refresh
+                    </label>
+                </div>
+                <div class="preview-frame" id="previewFrame">
+                    <img id="previewImage" alt="OLED Preview">
+                </div>
+            </div>
+        </main>
+
+        <!-- Right Sidebar: Widget Properties -->
+        <aside class="sidebar sidebar-right" id="propertiesPanel">
+            <div class="sidebar-header">
+                <h3>Properties</h3>
+            </div>
+            <div class="properties-content" id="propertiesContent">
+                <p class="placeholder-text">Select a widget on the canvas to edit its properties.</p>
+            </div>
+        </aside>
+    </div>
+
+    <!-- Preset modal -->
+    <div class="modal-overlay" id="modalOverlay" style="display:none;">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 id="modalTitle">Save Layout Preset</h3>
+                <button class="btn-close" id="btnModalClose">&times;</button>
+            </div>
+            <div class="modal-body" id="modalBody">
+                <label>Preset Name:</label>
+                <input type="text" id="inputPresetName" class="form-input" placeholder="My Layout">
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-ghost" id="btnModalCancel">Cancel</button>
+                <button class="btn btn-primary" id="btnModalConfirm">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast notifications -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

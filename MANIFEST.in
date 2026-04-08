@@ -1,0 +1,8 @@
+include README.md
+include LICENSE
+include requirements.txt
+recursive-include oled_dashboard/web/templates *.html
+recursive-include oled_dashboard/web/static *
+recursive-include systemd *.service
+recursive-include fonts *.ttf
+include install.sh

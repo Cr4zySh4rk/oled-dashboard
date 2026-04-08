@@ -1,0 +1,26 @@
+[Unit]
+Description=OLED Dashboard - Web-configurable OLED display manager
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/oled-dashboard
+ExecStart=/opt/oled-dashboard/venv/bin/python -m oled_dashboard
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Environment
+Environment=PYTHONUNBUFFERED=1
+
+# Hardening
+ProtectSystem=strict
+ReadWritePaths=/opt/oled-dashboard /root/.config/oled-dashboard /dev/i2c-1 /dev/spidev0.0 /dev/spidev0.1
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
