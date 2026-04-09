@@ -2,27 +2,77 @@
 SSD1306 / SH1106 OLED driver.
 Supports 128x64 (0.96"), 128x32 (0.91"), 64x48 (0.66"), 64x32 displays.
 
-Many cheap OLED modules are labeled SSD1306 but actually use an SH1106 chip.
-This driver auto-detects by trying SSD1306 first, then SH1106 — both via
-luma.oled (smbus2, no Blinka needed), with adafruit as a last resort.
+Key insight from the original OLED_Stats project:
+  Many OLED modules have their RST pin wired to a GPIO (default GPIO 4).
+  Without a hardware reset pulse (HIGH → LOW → HIGH) before initialisation,
+  the controller stays in an undefined state — it ACKs I2C writes silently
+  but never updates the display pixels. This is the most common cause of a
+  blank screen even when i2cdetect finds the device.
 
-Auto-detection works by sending a known pattern and checking whether the
-chip ACKs the display command. If SSD1306 init "succeeds" but luma reports
-back the SH1106-style display, we fall through to the SH1106 path.
+Driver tries in order:
+  1. GPIO reset (GPIO 4 by default, skipped gracefully if not wired)
+  2. luma.oled ssd1306
+  3. luma.oled sh1106  ← same address, commonly mislabeled modules
+  4. adafruit-circuitpython-ssd1306 (needs Blinka)
 """
 
+import time
 from PIL import Image
 from typing import Optional
 from oled_dashboard.drivers.base import OLEDDriver
 
 
+def _gpio_reset(gpio_pin: int = 4) -> None:
+    """
+    Pulse the OLED reset pin LOW then HIGH.
+    Matches the reset sequence used by the original OLED_Stats project.
+    Silently skipped if gpiozero / RPi.GPIO is unavailable or pin not wired.
+    """
+    # Try gpiozero first (cleanest API)
+    try:
+        import gpiozero
+        rst = gpiozero.OutputDevice(gpio_pin, active_high=False)
+        rst.on()           # active_high=False → pin goes HIGH (not reset)
+        time.sleep(0.1)
+        rst.off()          # pin goes LOW  → assert reset
+        time.sleep(0.1)
+        rst.on()           # pin goes HIGH → release reset
+        time.sleep(0.05)   # give controller time to boot
+        rst.close()
+        print(f"[OLED] GPIO {gpio_pin} reset pulse sent (via gpiozero)")
+        return
+    except Exception as e:
+        pass  # gpiozero not available or pin not wired
+
+    # Fall back to RPi.GPIO
+    try:
+        import RPi.GPIO as GPIO
+        GPIO.setwarnings(False)
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(gpio_pin, GPIO.OUT)
+        GPIO.output(gpio_pin, GPIO.HIGH)
+        time.sleep(0.1)
+        GPIO.output(gpio_pin, GPIO.LOW)
+        time.sleep(0.1)
+        GPIO.output(gpio_pin, GPIO.HIGH)
+        time.sleep(0.05)
+        print(f"[OLED] GPIO {gpio_pin} reset pulse sent (via RPi.GPIO)")
+        return
+    except Exception:
+        pass  # RPi.GPIO not available or running as non-root
+
+    print(f"[OLED] GPIO reset skipped (GPIO {gpio_pin} — no GPIO library or pin not wired)")
+
+
 class SSD1306Driver(OLEDDriver):
     """
     Driver for SSD1306 and SH1106-based OLED displays.
+
     Tries multiple backends in order:
-      1. luma.oled ssd1306
-      2. luma.oled sh1106   ← many "SSD1306" modules are actually this
-      3. adafruit-circuitpython-ssd1306 (needs Blinka)
+      1. GPIO reset pulse (GPIO 4, matching original OLED_Stats wiring)
+      2. luma.oled ssd1306
+      3. luma.oled sh1106  (many cheap modules are mislabeled)
+      4. adafruit-circuitpython-ssd1306 (needs Blinka)
     """
 
     CHIP = "SSD1306"
@@ -34,11 +84,15 @@ class SSD1306Driver(OLEDDriver):
     }
 
     def initialize(self) -> bool:
-        """Initialize the display, trying SSD1306 then SH1106 then adafruit."""
+        """Initialize display with GPIO reset → luma ssd1306 → luma sh1106 → adafruit."""
         error_messages = []
 
+        # ── GPIO hardware reset (critical for modules with RST on GPIO 4) ──
+        reset_pin = self.reset_pin if self.reset_pin is not None else 4
+        _gpio_reset(reset_pin)
+
         if self.interface == "i2c":
-            # ── 1. luma.oled SSD1306 ──────────────────────────────────────
+            # ── luma.oled SSD1306 ─────────────────────────────────────────
             try:
                 self._display = self._init_luma_i2c("ssd1306")
                 self._backend = "luma"
@@ -52,7 +106,7 @@ class SSD1306Driver(OLEDDriver):
             except Exception as e:
                 error_messages.append(f"luma ssd1306: {e}")
 
-            # ── 2. luma.oled SH1106 (same address, common mislabeling) ────
+            # ── luma.oled SH1106 (same address, common mislabeling) ───────
             try:
                 self._display = self._init_luma_i2c("sh1106")
                 self._backend = "luma"
@@ -62,13 +116,13 @@ class SSD1306Driver(OLEDDriver):
                 self._initialized = True
                 print(f"[OLED] Initialized SH1106 via luma.oled I2C "
                       f"(bus={self.i2c_bus}, addr=0x{self.address:02X})")
-                print(f"[OLED] NOTE: Your display appears to be an SH1106, not SSD1306.")
-                print(f"[OLED]       Consider changing 'chip' to 'SH1106' in your config.")
+                print(f"[OLED] NOTE: Your display is SH1106, not SSD1306. "
+                      f"Consider updating 'chip' in config to 'SH1106'.")
                 return True
             except Exception as e:
                 error_messages.append(f"luma sh1106: {e}")
 
-            # ── 3. adafruit-circuitpython-ssd1306 (needs Blinka) ──────────
+            # ── adafruit-circuitpython-ssd1306 (needs Blinka) ─────────────
             try:
                 self._display = self._init_adafruit_i2c()
                 self._backend = "adafruit"
@@ -108,7 +162,7 @@ class SSD1306Driver(OLEDDriver):
             except Exception as e:
                 error_messages.append(f"adafruit SPI: {e}")
 
-        # ── All methods failed — print clear diagnostics ───────────────────
+        # ── All methods failed ─────────────────────────────────────────────
         print(f"[OLED] *** HARDWARE INIT FAILED — display will NOT render ***")
         print(f"[OLED] Tried:")
         for msg in error_messages:
@@ -118,7 +172,7 @@ class SSD1306Driver(OLEDDriver):
         print(f"  2. Is device found? sudo i2cdetect -y {self.i2c_bus}")
         print(f"  3. Config address:  0x{self.address:02X} — try 0x3D if nothing at 0x3C")
         print(f"  4. Install deps:    pip install luma.oled smbus2")
-        print(f"  5. Run diagnostics: python /opt/oled-dashboard/test_display.py")
+        print(f"  5. Run diagnostic:  python /opt/oled-dashboard/test_display.py")
         self._initialized = False
         return False
 
@@ -154,7 +208,7 @@ class SSD1306Driver(OLEDDriver):
         if rot and hasattr(self._display, 'rotate'):
             self._display.rotate(rot)
 
-    # ── adafruit-circuitpython-ssd1306 backend ────────────────────────────
+    # ── adafruit backend ──────────────────────────────────────────────────
 
     def _init_adafruit_i2c(self):
         import board
@@ -195,7 +249,6 @@ class SSD1306Driver(OLEDDriver):
         if not self._initialized or self._display is None:
             return
 
-        # Software rotation for 90/270 degrees
         if self.rotation in (90, 270):
             image = image.rotate(-self.rotation, expand=True)
 

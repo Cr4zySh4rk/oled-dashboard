@@ -71,6 +71,49 @@ def run_i2cdetect(bus=1):
         fail(f"i2cdetect failed: {e}")
 
 
+def gpio_reset(gpio_pin=4):
+    step(f"Step 2b: GPIO hardware reset on GPIO {gpio_pin}")
+    info("The original OLED_Stats project pulses GPIO 4 LOW then HIGH before init.")
+    info("Without this, many modules accept I2C writes silently but show nothing.")
+
+    tried = False
+    try:
+        import gpiozero
+        rst = gpiozero.OutputDevice(gpio_pin, active_high=False)
+        rst.on()
+        time.sleep(0.1)
+        rst.off()
+        time.sleep(0.1)
+        rst.on()
+        time.sleep(0.05)
+        rst.close()
+        ok(f"GPIO {gpio_pin} reset pulse sent via gpiozero")
+        tried = True
+    except Exception as e:
+        info(f"gpiozero attempt: {e}")
+
+    if not tried:
+        try:
+            import RPi.GPIO as GPIO
+            GPIO.setwarnings(False)
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setup(gpio_pin, GPIO.OUT)
+            GPIO.output(gpio_pin, GPIO.HIGH)
+            time.sleep(0.1)
+            GPIO.output(gpio_pin, GPIO.LOW)
+            time.sleep(0.1)
+            GPIO.output(gpio_pin, GPIO.HIGH)
+            time.sleep(0.05)
+            ok(f"GPIO {gpio_pin} reset pulse sent via RPi.GPIO")
+            tried = True
+        except Exception as e:
+            info(f"RPi.GPIO attempt: {e}")
+
+    if not tried:
+        info(f"GPIO reset skipped — no GPIO library available. "
+             f"If your module has RST wired to GPIO {gpio_pin}, this may cause a blank screen.")
+
+
 def check_smbus2():
     step("Step 3: Test smbus2 import and raw I2C ping")
     try:
@@ -239,6 +282,7 @@ def main():
     results["i2c-dev module & /dev/i2c-1"] = True
 
     run_i2cdetect(args.bus)
+    gpio_reset(4)  # Always try GPIO 4 reset (matches original OLED_Stats wiring)
 
     results["smbus2 available"] = check_smbus2()
     results["Pillow available"] = check_pil()
