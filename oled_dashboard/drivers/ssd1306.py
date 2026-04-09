@@ -73,6 +73,34 @@ class SSD1306Driver(OLEDDriver):
         "64x32":  {"width": 64,  "height": 32, "description": '0.49" 64x32'},
     }
 
+    def _luma_rotation(self) -> int:
+        """Convert 180° rotation to luma rotation value.
+        Only 180° is handled in hardware; 90/270 are handled by PIL in display_image().
+        """
+        return 2 if self.rotation == 180 else 0
+
+    def _apply_hardware_rotation(self) -> None:
+        """Apply 180° rotation via hardware registers after init.
+        SSD1306 libraries init with 0xA1+0xC8 (segment remap + COM flip) by default,
+        which is the correct orientation for 0°. For 180°, we must change these
+        registers — PIL rotation does NOT work for 180° because it cancels out
+        with the default hardware scan direction.
+        90° and 270° are handled by PIL rotation in display_image().
+        """
+        if self.rotation != 180:
+            return
+
+        if self._backend == "adafruit":
+            try:
+                self._display.rotation = 2
+            except (AttributeError, Exception):
+                pass
+        elif self._backend == "luma":
+            # luma devices support rotate() for hardware rotation
+            if hasattr(self._display, 'rotate'):
+                self._display.rotate(2)
+        # smbus2 backend handles rotation in _smbus2_init() via register commands
+
     def initialize(self) -> bool:
         error_messages = []
         self._backend = None
@@ -90,12 +118,10 @@ class SSD1306Driver(OLEDDriver):
                 self._display = adafruit_ssd1306.SSD1306_I2C(
                     self.width, self.height, i2c, addr=self.address
                 )
-                # NOTE: We do NOT set hardware rotation here.
-                # All rotation is handled in display_image() via PIL for reliability.
-                # Clear like OLED_Stats does
                 self._display.fill(0)
                 self._display.show()
                 self._backend = "adafruit"
+                self._apply_hardware_rotation()
                 self._initialized = True
                 print(f"[OLED] Ready: SSD1306 adafruit I2C "
                       f"(addr=0x{self.address:02X}) — same stack as OLED_Stats")
@@ -108,9 +134,10 @@ class SSD1306Driver(OLEDDriver):
                 from luma.core.interface.serial import i2c as luma_i2c
                 from luma.oled.device import ssd1306
                 serial = luma_i2c(port=self.i2c_bus, address=self.address)
-                self._display = ssd1306(serial, width=self.width, height=self.height)
+                self._display = ssd1306(serial, width=self.width,
+                                        height=self.height,
+                                        rotate=self._luma_rotation())
                 self._backend = "luma"
-                # NOTE: No hardware rotation set — PIL rotation in display_image() handles it
                 self._display.clear()
                 self._initialized = True
                 print(f"[OLED] Ready: SSD1306 luma.oled I2C "
@@ -124,9 +151,10 @@ class SSD1306Driver(OLEDDriver):
                 from luma.core.interface.serial import i2c as luma_i2c
                 from luma.oled.device import sh1106
                 serial = luma_i2c(port=self.i2c_bus, address=self.address)
-                self._display = sh1106(serial, width=self.width, height=self.height)
+                self._display = sh1106(serial, width=self.width,
+                                       height=self.height,
+                                       rotate=self._luma_rotation())
                 self._backend = "luma"
-                # NOTE: No hardware rotation set — PIL rotation in display_image() handles it
                 self._display.clear()
                 self._initialized = True
                 print(f"[OLED] Ready: SH1106 luma.oled I2C "
@@ -157,12 +185,15 @@ class SSD1306Driver(OLEDDriver):
                     )
                     if chip_name == "sh1106":
                         from luma.oled.device import sh1106
-                        self._display = sh1106(serial, width=self.width, height=self.height)
+                        self._display = sh1106(serial, width=self.width,
+                                               height=self.height,
+                                               rotate=self._luma_rotation())
                     else:
                         from luma.oled.device import ssd1306
-                        self._display = ssd1306(serial, width=self.width, height=self.height)
+                        self._display = ssd1306(serial, width=self.width,
+                                                height=self.height,
+                                                rotate=self._luma_rotation())
                     self._backend = "luma"
-                    # NOTE: No hardware rotation — PIL rotation in display_image() handles all angles
                     self._display.clear()
                     self._initialized = True
                     print(f"[OLED] Ready: {chip_name.upper()} luma.oled SPI")
@@ -182,9 +213,13 @@ class SSD1306Driver(OLEDDriver):
     def _smbus2_init(self):
         import smbus2
         h = self.height
+        # For 0°: use 0xA1 (segment remap) + 0xC8 (COM scan flip) — standard orientation.
+        # For 180°: use 0xA0 (normal segment) + 0xC0 (normal COM scan) — flipped orientation.
+        seg_remap = 0xA0 if self.rotation == 180 else 0xA1
+        com_scan  = 0xC0 if self.rotation == 180 else 0xC8
         init_cmds = [
             0xAE, 0xD5, 0x80, 0xA8, h - 1, 0xD3, 0x00, 0x40,
-            0x8D, 0x14, 0x20, 0x00, 0xA1, 0xC8,
+            0x8D, 0x14, 0x20, 0x00, seg_remap, com_scan,
             0xDA, 0x12 if h == 64 else 0x02,
             0x81, 0xCF, 0xD9, 0xF1, 0xDB, 0x40, 0xA4, 0xA6, 0xAF,
         ]
@@ -198,10 +233,10 @@ class SSD1306Driver(OLEDDriver):
         if not self._initialized:
             return
 
-        # PIL-level rotation for ALL angles — reliable across all backends.
-        # 90/270 expand dimensions then resize back; 180 keeps same size.
-        if self.rotation in (90, 180, 270):
-            image = image.rotate(-self.rotation, expand=self.rotation in (90, 270))
+        # 180° is handled by hardware registers (segment remap + COM scan direction)
+        # set during initialize(). Only 90° and 270° need PIL software rotation.
+        if self.rotation in (90, 270):
+            image = image.rotate(-self.rotation, expand=True)
         if image.size != (self.width, self.height):
             image = image.resize((self.width, self.height))
         if image.mode != "1":
