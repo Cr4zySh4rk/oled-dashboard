@@ -6,10 +6,10 @@ Run this on your Pi to pinpoint exactly why the display isn't showing anything.
 Usage:
     sudo /opt/oled-dashboard/venv/bin/python test_display.py
 
-    # Or with a custom I2C address:
+    # Custom I2C address (try if default 0x3C doesn't work):
     sudo /opt/oled-dashboard/venv/bin/python test_display.py --addr 0x3D
 
-    # Or for a 128x32 display:
+    # 128x32 display:
     sudo /opt/oled-dashboard/venv/bin/python test_display.py --width 128 --height 32
 """
 
@@ -53,7 +53,6 @@ def run_i2cdetect(bus=1):
     try:
         out = subprocess.check_output(f"i2cdetect -y {bus}", shell=True).decode()
         print(out)
-        # Check for any address in the output that isn't '--'
         found = []
         for line in out.splitlines()[1:]:
             parts = line.split()
@@ -65,7 +64,7 @@ def run_i2cdetect(bus=1):
             ok(f"Device(s) found at address(es): {', '.join('0x'+a for a in found)}")
         else:
             fail("No I2C devices detected on bus 1")
-            info("Check your wiring: SDA→GPIO2(pin3), SCL→GPIO3(pin5), VCC→3.3V, GND→GND")
+            info("Check wiring: SDA→GPIO2(pin3), SCL→GPIO3(pin5), VCC→3.3V, GND→GND")
     except FileNotFoundError:
         fail("i2cdetect not found — install with: sudo apt install i2c-tools")
     except Exception as e:
@@ -104,8 +103,8 @@ def check_luma():
     step("Step 5: Test luma.oled import")
     try:
         from luma.core.interface.serial import i2c as luma_i2c
-        from luma.oled.device import ssd1306
-        ok("luma.oled imported OK")
+        from luma.oled.device import ssd1306, sh1106
+        ok("luma.oled imported OK (ssd1306 + sh1106 available)")
         return True
     except ImportError as e:
         fail(f"luma.oled import failed: {e}")
@@ -113,78 +112,108 @@ def check_luma():
         return False
 
 
-def draw_test_pattern(addr, width, height, bus=1):
-    step(f"Step 6: Init luma.oled SSD1306 and draw test pattern ({width}x{height})")
-    try:
-        from luma.core.interface.serial import i2c as luma_i2c
+def draw_test_pattern_chip(chip_name, addr, width, height, bus=1, wait=4):
+    """Try to draw on a specific chip type. Returns True if it succeeded without error."""
+    from luma.core.interface.serial import i2c as luma_i2c
+    from PIL import Image, ImageDraw
+
+    serial = luma_i2c(port=bus, address=addr)
+
+    if chip_name == "ssd1306":
         from luma.oled.device import ssd1306
-        from PIL import Image, ImageDraw, ImageFont
-
-        info(f"Opening I2C bus {bus}, address 0x{addr:02X} ...")
-        serial = luma_i2c(port=bus, address=addr)
         device = ssd1306(serial, width=width, height=height)
-        ok("luma.oled device created successfully")
+    else:
+        from luma.oled.device import sh1106
+        device = sh1106(serial, width=width, height=height)
 
-        # Draw a simple test pattern
-        img = Image.new("1", (width, height), 0)
-        draw = ImageDraw.Draw(img)
+    img = Image.new("1", (width, height), 0)
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([0, 0, width-1, height-1], outline=255)
+    draw.line([0, 0, width-1, height-1], fill=255)
+    draw.line([width-1, 0, 0, height-1], fill=255)
+    try:
+        draw.text((2, height//2 - 4), f"{chip_name.upper()} OK!", fill=255)
+    except Exception:
+        pass
 
-        # Border
-        draw.rectangle([0, 0, width-1, height-1], outline=255)
+    device.display(img)
+    info(f"Pattern sent via {chip_name.upper()} driver. Waiting {wait}s ...")
+    time.sleep(wait)
+    device.cleanup()
+    return True
 
-        # Diagonal cross
-        draw.line([0, 0, width-1, height-1], fill=255)
-        draw.line([width-1, 0, 0, height-1], fill=255)
 
-        # Text
+def chip_detection_test(addr, width, height, bus=1):
+    step("Step 6: Chip detection — try SSD1306 then SH1106")
+    info("Many modules labeled 'SSD1306' are actually SH1106 inside.")
+    info("Both chips respond at 0x3C and accept I2C writes — but need different init.")
+    info("")
+
+    working_chip = None
+
+    for chip in ("ssd1306", "sh1106"):
+        print(f"\n  Testing {chip.upper()} driver ...")
         try:
-            draw.text((2, height//2 - 4), "OLED OK!", fill=255)
-        except Exception:
-            pass
+            draw_test_pattern_chip(chip, addr, width, height, bus, wait=4)
+            print(f"\n  *** Did you see '{chip.upper()} OK!' on the display? ***")
+            ans = input("  Type 'y' for yes, anything else for no: ").strip().lower()
+            if ans == 'y':
+                ok(f"Display responded correctly to {chip.upper()} driver!")
+                working_chip = chip
+                break
+            else:
+                fail(f"{chip.upper()} driver did not produce visible output")
+        except Exception as e:
+            fail(f"{chip.upper()} driver raised an exception: {e}")
+            import traceback
+            traceback.print_exc()
 
-        info("Pushing test pattern to display ...")
-        device.display(img)
-        ok("Test pattern sent! You should see a box with an X and 'OLED OK!' on the display.")
-        ok("If you see it, the hardware is working fine — the issue is in the app config.")
-        info("Keeping display on for 5 seconds ...")
-        time.sleep(5)
-        device.cleanup()
-        return True
-
-    except Exception as e:
-        fail(f"luma.oled display test FAILED: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+    return working_chip
 
 
 def check_pil():
     step("Step 7: Check Pillow")
     try:
         from PIL import Image, ImageDraw
-        ok(f"Pillow imported OK")
+        ok("Pillow imported OK")
         return True
     except ImportError as e:
         fail(f"Pillow not available: {e}")
         return False
 
 
-def print_summary(results):
+def print_summary(results, working_chip=None):
     step("SUMMARY")
-    all_ok = all(results.values())
     for name, passed in results.items():
         if passed:
             ok(name)
         else:
             fail(name)
+
     print()
-    if all_ok:
-        print("\033[32m  All checks passed! Your OLED is working.\033[0m")
-        print("  If the dashboard app still doesn't show anything, check:")
-        print("   • sudo journalctl -u oled-dashboard -n 50")
-        print("   • The config I2C address matches: sudo cat ~/.config/oled-dashboard/config.json")
+    if working_chip:
+        print(f"\033[32m  Display works with {working_chip.upper()} driver!\033[0m")
+        if working_chip == "sh1106":
+            print()
+            print("  \033[33mAction required:\033[0m Your module is an SH1106, not SSD1306.")
+            print("  The app auto-detects this, but you can also set it explicitly:")
+            print("    sudo nano ~/.config/oled-dashboard/config.json")
+            print('    Change  "chip": "SSD1306"  →  "chip": "SH1106"')
+            print("    sudo systemctl restart oled-dashboard")
+        else:
+            print()
+            print("  The display hardware is confirmed working.")
+            print("  If the dashboard app still shows nothing:")
+            print("   • sudo journalctl -u oled-dashboard -n 50")
+            print("   • Check config: sudo cat ~/.config/oled-dashboard/config.json")
+    elif all(results.values()):
+        print("\033[31m  All low-level checks passed but neither chip driver produced output.\033[0m")
+        print("  Possible causes:")
+        print("   • Display is physically damaged or counterfeit")
+        print("   • Contrast/brightness stuck at 0 (try power cycling the Pi)")
+        print("   • Try a different OLED module if available")
     else:
-        print("\033[31m  Some checks failed. Fix the issues above then restart the service:\033[0m")
+        print("\033[31m  Some checks failed. Fix the issues above then try again.\033[0m")
         print("   sudo systemctl restart oled-dashboard")
         print("   sudo journalctl -u oled-dashboard -f")
 
@@ -207,11 +236,12 @@ def main():
     results = {}
 
     check_i2c_module()
-    results["i2c-dev module & /dev/i2c-1"] = True  # visual only
+    results["i2c-dev module & /dev/i2c-1"] = True
 
     run_i2cdetect(args.bus)
 
     results["smbus2 available"] = check_smbus2()
+    results["Pillow available"] = check_pil()
 
     if results["smbus2 available"]:
         results["device responds on I2C"] = raw_i2c_ping(addr, args.bus)
@@ -219,18 +249,16 @@ def main():
         results["device responds on I2C"] = False
 
     results["luma.oled available"] = check_luma()
-    results["Pillow available"] = check_pil()
 
+    working_chip = None
     if results["luma.oled available"] and results.get("device responds on I2C", False):
-        results["test pattern displayed"] = draw_test_pattern(addr, args.width, args.height, args.bus)
-    elif not results.get("device responds on I2C", False):
-        info("Skipping display test — device not responding on I2C")
-        results["test pattern displayed"] = False
+        working_chip = chip_detection_test(addr, args.width, args.height, args.bus)
+        results["display shows test pattern"] = working_chip is not None
     else:
-        info("Skipping display test — luma.oled not available")
-        results["test pattern displayed"] = False
+        info("Skipping display test — prerequisites not met")
+        results["display shows test pattern"] = False
 
-    print_summary(results)
+    print_summary(results, working_chip)
 
 
 if __name__ == "__main__":
