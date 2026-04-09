@@ -186,6 +186,78 @@ def draw_test_pattern_chip(chip_name, addr, width, height, bus=1, wait=4):
     return True
 
 
+def direct_smbus2_test(addr, width, height, bus=1):
+    step("Step 5b: Direct smbus2 framebuffer write (bypasses all OLED libraries)")
+    info("Converts PIL image to SSD1306 page format and writes in 32-byte I2C chunks.")
+    info("This works even if luma.oled or adafruit have library-level issues.")
+    try:
+        import smbus2
+        from PIL import Image, ImageDraw
+
+        # SSD1306 init sequence
+        pages = (height + 7) // 8
+        init_cmds = [
+            0xAE, 0xD5, 0x80, 0xA8, height - 1, 0xD3, 0x00, 0x40,
+            0x8D, 0x14, 0x20, 0x00, 0xA1, 0xC8,
+            0xDA, 0x12 if height == 64 else 0x02,
+            0x81, 0xCF, 0xD9, 0xF1, 0xDB, 0x40, 0xA4, 0xA6, 0xAF,
+        ]
+        with smbus2.SMBus(bus) as b:
+            for c in init_cmds:
+                b.write_byte_data(addr, 0x00, c)
+        info("Init commands sent.")
+
+        # Build test image
+        img = Image.new("1", (width, height), 0)
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([0, 0, width-1, height-1], outline=255)
+        draw.line([0, 0, width-1, height-1], fill=255)
+        draw.line([width-1, 0, 0, height-1], fill=255)
+        try:
+            draw.text((2, height//2 - 4), "SMBUS2 OK!", fill=255)
+        except Exception:
+            pass
+
+        # Convert to SSD1306 page format
+        pixels = img.load()
+        buf = []
+        for page in range(pages):
+            for x in range(width):
+                byte = 0
+                for bit in range(8):
+                    y = page * 8 + bit
+                    if y < height and pixels[x, y]:
+                        byte |= (1 << bit)
+                buf.append(byte)
+
+        # Send in 32-byte chunks
+        with smbus2.SMBus(bus) as b:
+            b.write_byte_data(addr, 0x00, 0x20); b.write_byte_data(addr, 0x00, 0x00)
+            b.write_byte_data(addr, 0x00, 0x21); b.write_byte_data(addr, 0x00, 0x00)
+            b.write_byte_data(addr, 0x00, width - 1)
+            b.write_byte_data(addr, 0x00, 0x22); b.write_byte_data(addr, 0x00, 0x00)
+            b.write_byte_data(addr, 0x00, pages - 1)
+            for i in range(0, len(buf), 32):
+                b.write_i2c_block_data(addr, 0x40, buf[i:i+32])
+
+        info("Framebuffer sent. Waiting 5s ...")
+        time.sleep(5)
+
+        print("\n  *** Did you see 'SMBUS2 OK!' on the display with a box and X? ***")
+        ans = input("  Type 'y' for yes, anything else for no: ").strip().lower()
+        if ans == 'y':
+            ok("Direct smbus2 framebuffer write works!")
+            return True
+        else:
+            fail("Direct smbus2 also produced no visible output.")
+            return False
+    except Exception as e:
+        fail(f"Direct smbus2 test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def chip_detection_test(addr, width, height, bus=1):
     step("Step 6: Chip detection — try SSD1306 then SH1106")
     info("Many modules labeled 'SSD1306' are actually SH1106 inside.")
@@ -295,12 +367,20 @@ def main():
     results["luma.oled available"] = check_luma()
 
     working_chip = None
+    # Try direct smbus2 first — bypasses library issues entirely
+    if results["smbus2 available"] and results.get("device responds on I2C", False):
+        results["direct smbus2 render"] = direct_smbus2_test(addr, args.width, args.height, args.bus)
+    else:
+        results["direct smbus2 render"] = False
+
+    # If direct smbus2 didn't visually work, try luma.oled chip detection
+    working_chip = None
     if results["luma.oled available"] and results.get("device responds on I2C", False):
         working_chip = chip_detection_test(addr, args.width, args.height, args.bus)
-        results["display shows test pattern"] = working_chip is not None
+        results["luma display shows pattern"] = working_chip is not None
     else:
-        info("Skipping display test — prerequisites not met")
-        results["display shows test pattern"] = False
+        info("Skipping luma display test — prerequisites not met")
+        results["luma display shows pattern"] = False
 
     print_summary(results, working_chip)
 

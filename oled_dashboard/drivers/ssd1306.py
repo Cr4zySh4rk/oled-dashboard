@@ -2,18 +2,15 @@
 SSD1306 / SH1106 OLED driver.
 Supports 128x64 (0.96"), 128x32 (0.91"), 64x48 (0.66"), 64x32 displays.
 
-Key insight from the original OLED_Stats project:
-  Many OLED modules have their RST pin wired to a GPIO (default GPIO 4).
-  Without a hardware reset pulse (HIGH → LOW → HIGH) before initialisation,
-  the controller stays in an undefined state — it ACKs I2C writes silently
-  but never updates the display pixels. This is the most common cause of a
-  blank screen even when i2cdetect finds the device.
+For 4-pin I2C modules (VCC GND SDA SCL) — no RST pin, no GPIO needed.
 
-Driver tries in order:
-  1. GPIO reset (GPIO 4 by default, skipped gracefully if not wired)
-  2. luma.oled ssd1306
-  3. luma.oled sh1106  ← same address, commonly mislabeled modules
-  4. adafruit-circuitpython-ssd1306 (needs Blinka)
+Rendering pipeline (tried in order):
+  1. luma.oled ssd1306.display(image)   — primary path
+  2. luma.oled sh1106.display(image)    — same address, mislabeled modules
+  3. Direct smbus2 framebuffer write    — guaranteed fallback, bypasses both
+     libraries, sends pixels in 32-byte I2C chunks that work on all platforms
+     including Pi 5 RP1 I2C controller
+  4. adafruit-circuitpython-ssd1306     — last resort (needs Blinka)
 """
 
 import time
@@ -22,57 +19,65 @@ from typing import Optional
 from oled_dashboard.drivers.base import OLEDDriver
 
 
-def _gpio_reset(gpio_pin: int = 4) -> None:
+# ── Direct smbus2 rendering (no external OLED library needed) ─────────────────
+
+def _pil_to_ssd1306_bytes(image: Image.Image) -> bytes:
     """
-    Pulse the OLED reset pin LOW then HIGH.
-    Matches the reset sequence used by the original OLED_Stats project.
-    Silently skipped if gpiozero / RPi.GPIO is unavailable or pin not wired.
+    Convert a PIL mode-'1' image to the SSD1306 native page format.
+    SSD1306 stores pixels as pages of 8 rows; within each page, each byte
+    is one column, with bit-0 being the top row of that page.
+    PIL stores pixels row-major with bit-7 first.
     """
-    # Try gpiozero first (cleanest API)
-    try:
-        import gpiozero
-        rst = gpiozero.OutputDevice(gpio_pin, active_high=False)
-        rst.on()           # active_high=False → pin goes HIGH (not reset)
-        time.sleep(0.1)
-        rst.off()          # pin goes LOW  → assert reset
-        time.sleep(0.1)
-        rst.on()           # pin goes HIGH → release reset
-        time.sleep(0.05)   # give controller time to boot
-        rst.close()
-        print(f"[OLED] GPIO {gpio_pin} reset pulse sent (via gpiozero)")
-        return
-    except Exception as e:
-        pass  # gpiozero not available or pin not wired
+    if image.mode != "1":
+        image = image.convert("1")
+    w, h = image.size
+    pages = (h + 7) // 8
+    pixels = image.load()
+    buf = []
+    for page in range(pages):
+        for x in range(w):
+            byte = 0
+            for bit in range(8):
+                y = page * 8 + bit
+                if y < h and pixels[x, y]:
+                    byte |= (1 << bit)
+            buf.append(byte)
+    return bytes(buf)
 
-    # Fall back to RPi.GPIO
-    try:
-        import RPi.GPIO as GPIO
-        GPIO.setwarnings(False)
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setup(gpio_pin, GPIO.OUT)
-        GPIO.output(gpio_pin, GPIO.HIGH)
-        time.sleep(0.1)
-        GPIO.output(gpio_pin, GPIO.LOW)
-        time.sleep(0.1)
-        GPIO.output(gpio_pin, GPIO.HIGH)
-        time.sleep(0.05)
-        print(f"[OLED] GPIO {gpio_pin} reset pulse sent (via RPi.GPIO)")
-        return
-    except Exception:
-        pass  # RPi.GPIO not available or running as non-root
 
-    print(f"[OLED] GPIO reset skipped (GPIO {gpio_pin} — no GPIO library or pin not wired)")
+def _smbus2_display(image: Image.Image, bus_num: int, addr: int, width: int, height: int) -> None:
+    """
+    Write a PIL image directly to an SSD1306/SH1106 via smbus2.
+    Sends data in 32-byte chunks — safe for all I2C controller buffer sizes
+    including the Pi 5 RP1 chip.
+    """
+    import smbus2
 
+    buf = _pil_to_ssd1306_bytes(image)
+    pages = (height + 7) // 8
+
+    with smbus2.SMBus(bus_num) as bus:
+        def cmd(b):
+            bus.write_byte_data(addr, 0x00, b)
+
+        # Set horizontal addressing mode and full-screen window
+        cmd(0x20); cmd(0x00)          # Horizontal addressing mode
+        cmd(0x21); cmd(0x00); cmd(width - 1)   # Column start / end
+        cmd(0x22); cmd(0x00); cmd(pages - 1)   # Page start / end
+
+        # Send framebuffer in 32-byte chunks
+        CHUNK = 32
+        for i in range(0, len(buf), CHUNK):
+            chunk = list(buf[i:i + CHUNK])
+            bus.write_i2c_block_data(addr, 0x40, chunk)
+
+
+# ── Driver class ──────────────────────────────────────────────────────────────
 
 class SSD1306Driver(OLEDDriver):
     """
-    Driver for SSD1306 and SH1106-based OLED displays.
-
-    Tries multiple backends in order:
-      1. GPIO reset pulse (GPIO 4, matching original OLED_Stats wiring)
-      2. luma.oled ssd1306
-      3. luma.oled sh1106  (many cheap modules are mislabeled)
-      4. adafruit-circuitpython-ssd1306 (needs Blinka)
+    Driver for 4-pin I2C SSD1306 and SH1106 OLED displays.
+    No GPIO/RST pin required.
     """
 
     CHIP = "SSD1306"
@@ -84,53 +89,63 @@ class SSD1306Driver(OLEDDriver):
     }
 
     def initialize(self) -> bool:
-        """Initialize display with GPIO reset → luma ssd1306 → luma sh1106 → adafruit."""
         error_messages = []
 
-        # ── GPIO hardware reset (critical for modules with RST on GPIO 4) ──
-        reset_pin = self.reset_pin if self.reset_pin is not None else 4
-        _gpio_reset(reset_pin)
-
         if self.interface == "i2c":
-            # ── luma.oled SSD1306 ─────────────────────────────────────────
+            # ── 1. luma.oled SSD1306 ─────────────────────────────────────
             try:
                 self._display = self._init_luma_i2c("ssd1306")
                 self._backend = "luma"
                 self._chip_used = "ssd1306"
                 self._apply_rotation_luma()
-                self.clear()
                 self._initialized = True
-                print(f"[OLED] Initialized SSD1306 via luma.oled I2C "
-                      f"(bus={self.i2c_bus}, addr=0x{self.address:02X})")
+                self._luma_verify_or_fallback_to_smbus2()
+                print(f"[OLED] Ready: SSD1306 luma.oled I2C "
+                      f"(bus={self.i2c_bus}, addr=0x{self.address:02X}, "
+                      f"render={'direct-smbus2' if self._use_smbus2 else 'luma'})")
                 return True
             except Exception as e:
                 error_messages.append(f"luma ssd1306: {e}")
 
-            # ── luma.oled SH1106 (same address, common mislabeling) ───────
+            # ── 2. luma.oled SH1106 ──────────────────────────────────────
             try:
                 self._display = self._init_luma_i2c("sh1106")
                 self._backend = "luma"
                 self._chip_used = "sh1106"
                 self._apply_rotation_luma()
-                self.clear()
                 self._initialized = True
-                print(f"[OLED] Initialized SH1106 via luma.oled I2C "
-                      f"(bus={self.i2c_bus}, addr=0x{self.address:02X})")
-                print(f"[OLED] NOTE: Your display is SH1106, not SSD1306. "
-                      f"Consider updating 'chip' in config to 'SH1106'.")
+                self._luma_verify_or_fallback_to_smbus2()
+                print(f"[OLED] Ready: SH1106 luma.oled I2C "
+                      f"(bus={self.i2c_bus}, addr=0x{self.address:02X}, "
+                      f"render={'direct-smbus2' if self._use_smbus2 else 'luma'})")
+                print(f"[OLED] NOTE: Your module is SH1106, not SSD1306. "
+                      f"You can set 'chip': 'SH1106' in config.")
                 return True
             except Exception as e:
                 error_messages.append(f"luma sh1106: {e}")
 
-            # ── adafruit-circuitpython-ssd1306 (needs Blinka) ─────────────
+            # ── 3. Direct smbus2 (no luma needed) ────────────────────────
+            try:
+                self._smbus2_init()
+                self._backend = "smbus2"
+                self._chip_used = "ssd1306"
+                self._use_smbus2 = True
+                self._initialized = True
+                print(f"[OLED] Ready: SSD1306 direct smbus2 "
+                      f"(bus={self.i2c_bus}, addr=0x{self.address:02X})")
+                return True
+            except Exception as e:
+                error_messages.append(f"direct smbus2: {e}")
+
+            # ── 4. adafruit-circuitpython-ssd1306 ────────────────────────
             try:
                 self._display = self._init_adafruit_i2c()
                 self._backend = "adafruit"
                 self._chip_used = "ssd1306"
-                self._apply_rotation_adafruit()
-                self.clear()
+                self._use_smbus2 = False
                 self._initialized = True
-                print(f"[OLED] Initialized SSD1306 via adafruit I2C "
+                self.clear()
+                print(f"[OLED] Ready: SSD1306 adafruit I2C "
                       f"(bus={self.i2c_bus}, addr=0x{self.address:02X})")
                 return True
             except Exception as e:
@@ -142,41 +157,80 @@ class SSD1306Driver(OLEDDriver):
                     self._display = self._init_luma_spi(chip_name)
                     self._backend = "luma"
                     self._chip_used = chip_name
+                    self._use_smbus2 = False
                     self._apply_rotation_luma()
                     self.clear()
                     self._initialized = True
-                    print(f"[OLED] Initialized {chip_name.upper()} via luma.oled SPI")
+                    print(f"[OLED] Ready: {chip_name.upper()} luma.oled SPI")
                     return True
                 except Exception as e:
                     error_messages.append(f"luma SPI {chip_name}: {e}")
 
-            try:
-                self._display = self._init_adafruit_spi()
-                self._backend = "adafruit"
-                self._chip_used = "ssd1306"
-                self._apply_rotation_adafruit()
-                self.clear()
-                self._initialized = True
-                print(f"[OLED] Initialized via adafruit SPI")
-                return True
-            except Exception as e:
-                error_messages.append(f"adafruit SPI: {e}")
-
-        # ── All methods failed ─────────────────────────────────────────────
-        print(f"[OLED] *** HARDWARE INIT FAILED — display will NOT render ***")
-        print(f"[OLED] Tried:")
+        # ── All failed ────────────────────────────────────────────────────
+        print(f"[OLED] *** HARDWARE INIT FAILED ***")
         for msg in error_messages:
             print(f"  • {msg}")
-        print(f"[OLED] Diagnostics:")
-        print(f"  1. Is I2C enabled?  sudo raspi-config → Interface Options → I2C")
-        print(f"  2. Is device found? sudo i2cdetect -y {self.i2c_bus}")
-        print(f"  3. Config address:  0x{self.address:02X} — try 0x3D if nothing at 0x3C")
-        print(f"  4. Install deps:    pip install luma.oled smbus2")
-        print(f"  5. Run diagnostic:  python /opt/oled-dashboard/test_display.py")
+        print(f"[OLED] Check: i2cdetect -y {self.i2c_bus}  |  addr=0x{self.address:02X}")
+        print(f"[OLED] Diagnostic: python /opt/oled-dashboard/test_display.py")
         self._initialized = False
         return False
 
-    # ── luma.oled backends ────────────────────────────────────────────────
+    # ── luma.oled verification ────────────────────────────────────────────────
+
+    def _luma_verify_or_fallback_to_smbus2(self):
+        """
+        After luma.oled init, try a test render via device.display().
+        If that raises an exception, fall back to direct smbus2 rendering.
+        Some platforms (e.g. Pi 5 RP1 I2C) reject large luma I2C writes.
+        """
+        self._use_smbus2 = False
+        try:
+            test_img = Image.new("1", (self.width, self.height), 0)
+            self._display.display(test_img)
+        except Exception as e:
+            print(f"[OLED] luma display() failed ({e}), switching to direct smbus2 render")
+            self._use_smbus2 = True
+
+    # ── smbus2 direct init ────────────────────────────────────────────────────
+
+    def _smbus2_init(self):
+        """
+        Initialise an SSD1306 via raw smbus2 commands.
+        Sends the standard initialization sequence used by most SSD1306 libraries.
+        """
+        import smbus2
+
+        w, h = self.width, self.height
+        pages = (h + 7) // 8
+
+        init_cmds = [
+            0xAE,           # Display off
+            0xD5, 0x80,     # Set display clock divide ratio / oscillator frequency
+            0xA8, h - 1,    # Set multiplex ratio
+            0xD3, 0x00,     # Set display offset
+            0x40,           # Set start line = 0
+            0x8D, 0x14,     # Charge pump: enable
+            0x20, 0x00,     # Memory addressing: horizontal
+            0xA1,           # Segment re-map: col 127 = SEG0
+            0xC8,           # COM scan direction: remapped
+            0xDA, 0x12 if h == 64 else 0x02,  # COM pins hardware config
+            0x81, 0xCF,     # Contrast
+            0xD9, 0xF1,     # Pre-charge period
+            0xDB, 0x40,     # VCOMH deselect level
+            0xA4,           # Entire display ON (use RAM content)
+            0xA6,           # Normal display (not inverted)
+            0xAF,           # Display ON
+        ]
+
+        with smbus2.SMBus(self.i2c_bus) as bus:
+            for c in init_cmds:
+                bus.write_byte_data(self.address, 0x00, c)
+
+        # Send a blank frame to clear any garbage
+        blank = Image.new("1", (w, h), 0)
+        _smbus2_display(blank, self.i2c_bus, self.address, w, h)
+
+    # ── luma.oled backends ────────────────────────────────────────────────────
 
     def _init_luma_i2c(self, chip: str = "ssd1306"):
         from luma.core.interface.serial import i2c as luma_i2c
@@ -191,10 +245,8 @@ class SSD1306Driver(OLEDDriver):
     def _init_luma_spi(self, chip: str = "ssd1306"):
         from luma.core.interface.serial import spi as luma_spi
         serial = luma_spi(
-            device=self.spi_device,
-            port=0,
-            gpio_DC=self.spi_dc_pin,
-            gpio_RST=self.spi_reset_pin,
+            device=self.spi_device, port=0,
+            gpio_DC=self.spi_dc_pin, gpio_RST=self.spi_reset_pin,
         )
         if chip == "sh1106":
             from luma.oled.device import sh1106
@@ -208,71 +260,62 @@ class SSD1306Driver(OLEDDriver):
         if rot and hasattr(self._display, 'rotate'):
             self._display.rotate(rot)
 
-    # ── adafruit backend ──────────────────────────────────────────────────
+    # ── adafruit backend ──────────────────────────────────────────────────────
 
     def _init_adafruit_i2c(self):
-        import board
-        import busio
-        import adafruit_ssd1306
-
+        import board, busio, adafruit_ssd1306
         i2c = busio.I2C(board.SCL, board.SDA)
-        return adafruit_ssd1306.SSD1306_I2C(
-            self.width, self.height, i2c, addr=self.address
-        )
+        return adafruit_ssd1306.SSD1306_I2C(self.width, self.height, i2c, addr=self.address)
 
     def _init_adafruit_spi(self):
-        import board
-        import busio
-        import digitalio
-        import adafruit_ssd1306
-
+        import board, busio, digitalio, adafruit_ssd1306
         spi = busio.SPI(board.SCK, MOSI=board.MOSI)
         dc = digitalio.DigitalInOut(getattr(board, f"D{self.spi_dc_pin}"))
         cs = digitalio.DigitalInOut(getattr(board, f"D{self.spi_cs_pin}"))
-        reset = None
-        if self.spi_reset_pin is not None:
-            reset = digitalio.DigitalInOut(getattr(board, f"D{self.spi_reset_pin}"))
-        return adafruit_ssd1306.SSD1306_SPI(
-            self.width, self.height, spi, dc, reset, cs
-        )
+        reset = (digitalio.DigitalInOut(getattr(board, f"D{self.spi_reset_pin}"))
+                 if self.spi_reset_pin is not None else None)
+        return adafruit_ssd1306.SSD1306_SPI(self.width, self.height, spi, dc, reset, cs)
 
-    def _apply_rotation_adafruit(self):
-        if self.rotation == 180:
-            try:
-                self._display.rotate(2)
-            except AttributeError:
-                self._display.rotation = 2
-
-    # ── Unified display methods ───────────────────────────────────────────
+    # ── Unified display methods ───────────────────────────────────────────────
 
     def display_image(self, image: Image.Image) -> None:
-        if not self._initialized or self._display is None:
+        if not self._initialized or self._display is None and not getattr(self, '_use_smbus2', False):
             return
 
         if self.rotation in (90, 270):
             image = image.rotate(-self.rotation, expand=True)
-
         if image.size != (self.width, self.height):
             image = image.resize((self.width, self.height))
         if image.mode != "1":
             image = image.convert("1")
 
-        if getattr(self, '_backend', None) == "luma":
+        backend = getattr(self, '_backend', None)
+
+        if backend == "smbus2" or getattr(self, '_use_smbus2', False):
+            _smbus2_display(image, self.i2c_bus, self.address, self.width, self.height)
+        elif backend == "luma":
             self._display.display(image)
-        else:
+        elif backend == "adafruit":
             self._display.image(image)
             self._display.show()
 
     def clear(self) -> None:
-        if self._display is None:
-            return
-        if getattr(self, '_backend', None) == "luma":
-            self._display.clear()
-        else:
-            self._display.fill(0)
-            self._display.show()
+        blank = Image.new("1", (self.width, self.height), 0)
+        self.display_image(blank)
 
     def set_brightness(self, level: int) -> None:
-        if self._display is not None:
-            level = max(0, min(255, level))
-            self._display.contrast(level)
+        level = max(0, min(255, level))
+        backend = getattr(self, '_backend', None)
+        if backend == "smbus2" or getattr(self, '_use_smbus2', False):
+            try:
+                import smbus2
+                with smbus2.SMBus(self.i2c_bus) as bus:
+                    bus.write_byte_data(self.address, 0x00, 0x81)
+                    bus.write_byte_data(self.address, 0x00, level)
+            except Exception:
+                pass
+        elif self._display is not None:
+            try:
+                self._display.contrast(level)
+            except Exception:
+                pass
