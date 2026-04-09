@@ -165,17 +165,43 @@ setup_python_env() {
 
     cd "$INSTALL_DIR"
 
-    # Create venv
+    # Create venv with --system-site-packages so apt-installed python3-pil is available
+    # (same approach as the original OLED_Stats project)
     python3 -m venv --system-site-packages venv
     source venv/bin/activate
 
     # Upgrade pip
     pip install --upgrade pip setuptools wheel 2>/dev/null
 
-    # Install dependencies
-    pip install -r requirements.txt 2>/dev/null
+    # ── Install OLED display stack in the same order as OLED_Stats ──────────
+    # adafruit-blinka MUST be installed first and upgraded, it wraps Pi I2C/GPIO
+    # into the CircuitPython-compatible API used by adafruit-circuitpython-ssd1306
+    log_info "Installing adafruit-blinka (CircuitPython Pi bridge)..."
+    pip install --upgrade adafruit-blinka 2>/dev/null \
+        && log_info "adafruit-blinka installed" \
+        || log_warn "adafruit-blinka install failed (will try fallback libraries)"
 
-    # Install the package
+    log_info "Installing adafruit-circuitpython-ssd1306..."
+    pip install adafruit-circuitpython-ssd1306 2>/dev/null \
+        && log_info "adafruit-circuitpython-ssd1306 installed" \
+        || log_warn "adafruit-circuitpython-ssd1306 install failed (will try fallback libraries)"
+
+    # ── Core dependencies ────────────────────────────────────────────────────
+    log_info "Installing core dependencies..."
+    pip install psutil flask 2>/dev/null
+
+    # Pillow: prefer apt-installed python3-pil (already via system-site-packages),
+    # but install via pip as well for the venv in case apt version is old
+    pip install "Pillow>=9.0" 2>/dev/null \
+        || log_warn "Pillow pip install failed, using system python3-pil"
+
+    # ── Fallback OLED libraries (luma.oled + smbus2) ─────────────────────────
+    # Used if adafruit-blinka is unavailable (e.g. DietPi kernel differences)
+    log_info "Installing fallback OLED libraries (luma.oled, smbus2)..."
+    pip install luma.oled luma.core smbus2 2>/dev/null \
+        || log_warn "luma.oled install failed (adafruit stack will be used instead)"
+
+    # ── Install the dashboard package itself ─────────────────────────────────
     pip install -e . 2>/dev/null
 
     deactivate
