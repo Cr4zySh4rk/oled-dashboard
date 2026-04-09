@@ -11,6 +11,17 @@ from PIL import ImageDraw
 from oled_dashboard.widgets.base import Widget
 
 
+def _draw_widget_icon(draw: ImageDraw.ImageDraw, widget, icon_size: int) -> int:
+    """Draw the widget's icon if enabled. Returns text_x offset."""
+    show_icon = widget.config.get("show_icon", True)
+    if show_icon and widget.width > icon_size + 20:
+        from oled_dashboard.icons import draw_icon, icon_width as _iw
+        icon_y = widget.y + max(0, (widget.height - icon_size) // 2)
+        draw_icon(draw, widget.WIDGET_ID, widget.x, icon_y, size=icon_size)
+        return widget.x + _iw(icon_size)
+    return widget.x
+
+
 class IPAddressWidget(Widget):
     """Displays the system's IP address."""
 
@@ -51,11 +62,13 @@ class IPAddressWidget(Widget):
 
     def render(self, draw: ImageDraw.ImageDraw, data: Any) -> None:
         font = self.get_font()
+        icon_size = min(self.height - 2, 10)
+        tx = _draw_widget_icon(draw, self, icon_size)
         show_label = self.config.get("show_label", True)
         if show_label:
-            draw.text((self.x, self.y), f"IP: {data['ip']}", font=font, fill=255)
+            draw.text((tx, self.y), f"IP: {data['ip']}", font=font, fill=255)
         else:
-            draw.text((self.x, self.y), data["ip"], font=font, fill=255)
+            draw.text((tx, self.y), data["ip"], font=font, fill=255)
 
 
 class NetworkSpeedWidget(Widget):
@@ -142,12 +155,14 @@ class NetworkSpeedWidget(Widget):
         rx = self._format_speed(data["rx_speed"])
         tx = self._format_speed(data["tx_speed"])
         iface = data["interface"]
+        icon_size = min(self.height - 2, 10)
+        tx_x = _draw_widget_icon(draw, self, icon_size)
 
         if self.height >= 24:
-            draw.text((self.x, self.y), f"{iface}:", font=font, fill=255)
-            draw.text((self.x, self.y + self.font_size + 1), f"↓{rx} ↑{tx}", font=font, fill=255)
+            draw.text((tx_x, self.y), f"{iface}:", font=font, fill=255)
+            draw.text((tx_x, self.y + self.font_size + 1), f"↓{rx} ↑{tx}", font=font, fill=255)
         else:
-            draw.text((self.x, self.y), f"↓{rx} ↑{tx}", font=font, fill=255)
+            draw.text((tx_x, self.y), f"↓{rx} ↑{tx}", font=font, fill=255)
 
 
 class NetworkUsageWidget(Widget):
@@ -187,5 +202,7 @@ class NetworkUsageWidget(Widget):
 
     def render(self, draw: ImageDraw.ImageDraw, data: Any) -> None:
         font = self.get_font()
+        icon_size = min(self.height - 2, 10)
+        tx = _draw_widget_icon(draw, self, icon_size)
         text = f"↓{data['rx_gb']}G ↑{data['tx_gb']}G"
-        draw.text((self.x, self.y), text, font=font, fill=255)
+        draw.text((tx, self.y), text, font=font, fill=255)

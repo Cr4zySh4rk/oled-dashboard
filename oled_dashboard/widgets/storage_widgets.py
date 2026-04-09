@@ -8,6 +8,17 @@ from PIL import ImageDraw
 from oled_dashboard.widgets.base import Widget
 
 
+def _draw_widget_icon(draw: ImageDraw.ImageDraw, widget, icon_size: int) -> int:
+    """Draw the widget's icon if enabled. Returns text_x offset."""
+    show_icon = widget.config.get("show_icon", True)
+    if show_icon and widget.width > icon_size + 20:
+        from oled_dashboard.icons import draw_icon, icon_width as _iw
+        icon_y = widget.y + max(0, (widget.height - icon_size) // 2)
+        draw_icon(draw, widget.WIDGET_ID, widget.x, icon_y, size=icon_size)
+        return widget.x + _iw(icon_size)
+    return widget.x
+
+
 class DiskSpaceWidget(Widget):
     """Displays disk space usage for a mount point."""
 
@@ -42,23 +53,26 @@ class DiskSpaceWidget(Widget):
         font = self.get_font()
         pct = data["percent"]
         show_bar = self.config.get("show_bar", False)
+        icon_size = min(self.height - 2, 10)
+        tx = _draw_widget_icon(draw, self, icon_size)
+        avail_w = self.width - (tx - self.x)
 
         if show_bar and self.height >= 14:
-            draw.text((self.x, self.y), "Disk", font=font, fill=255)
+            draw.text((tx, self.y), "Disk", font=font, fill=255)
             pct_text = f"{pct:.0f}%"
-            draw.text((self.x + self.width - len(pct_text) * 6, self.y), pct_text, font=font, fill=255)
+            draw.text((tx + avail_w - len(pct_text) * 6, self.y), pct_text, font=font, fill=255)
             bar_y = self.y + self.font_size + 1
             bar_h = max(4, self.height - self.font_size - 2)
-            draw.rectangle([self.x, bar_y, self.x + self.width, bar_y + bar_h], outline=255)
-            fill_w = int((self.width - 2) * pct / 100)
+            draw.rectangle([tx, bar_y, tx + avail_w, bar_y + bar_h], outline=255)
+            fill_w = int((avail_w - 2) * pct / 100)
             if fill_w > 0:
                 draw.rectangle(
-                    [self.x + 1, bar_y + 1, self.x + 1 + fill_w, bar_y + bar_h - 1],
+                    [tx + 1, bar_y + 1, tx + 1 + fill_w, bar_y + bar_h - 1],
                     fill=255,
                 )
         else:
             text = f"Disk: {data['used_gb']}/{data['total_gb']}GB {pct:.0f}%"
-            draw.text((self.x, self.y), text, font=font, fill=255)
+            draw.text((tx, self.y), text, font=font, fill=255)
 
 
 class DiskIOWidget(Widget):
@@ -119,5 +133,7 @@ class DiskIOWidget(Widget):
 
     def render(self, draw: ImageDraw.ImageDraw, data: Any) -> None:
         font = self.get_font()
+        icon_size = min(self.height - 2, 10)
+        tx = _draw_widget_icon(draw, self, icon_size)
         text = f"R:{data['read_kb']}K W:{data['write_kb']}K"
-        draw.text((self.x, self.y), text, font=font, fill=255)
+        draw.text((tx, self.y), text, font=font, fill=255)

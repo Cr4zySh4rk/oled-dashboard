@@ -10,6 +10,28 @@ from PIL import ImageDraw
 from oled_dashboard.widgets.base import Widget
 
 
+def _icon_offset(widget, icon_size: int) -> Tuple[int, int]:
+    """Return (text_x, icon_y) for a widget with icon support."""
+    show_icon = widget.config.get("show_icon", True)
+    if show_icon and widget.width > icon_size + 20:
+        from oled_dashboard.icons import draw_icon, icon_width as _iw
+        icon_y = widget.y + max(0, (widget.height - icon_size) // 2)
+        draw_icon(None, widget.WIDGET_ID, widget.x, icon_y, size=icon_size)
+        return widget.x + _iw(icon_size), icon_y
+    return widget.x, widget.y
+
+
+def _draw_widget_icon(draw: ImageDraw.ImageDraw, widget, icon_size: int):
+    """Draw the widget's icon if enabled. Returns text_x offset."""
+    show_icon = widget.config.get("show_icon", True)
+    if show_icon and widget.width > icon_size + 20:
+        from oled_dashboard.icons import draw_icon, icon_width as _iw
+        icon_y = widget.y + max(0, (widget.height - icon_size) // 2)
+        draw_icon(draw, widget.WIDGET_ID, widget.x, icon_y, size=icon_size)
+        return widget.x + _iw(icon_size)
+    return widget.x
+
+
 class CPUUsageWidget(Widget):
     """Displays current CPU usage percentage."""
 
@@ -56,27 +78,25 @@ class CPUUsageWidget(Widget):
         font = self.get_font()
         show_bar = self.config.get("show_bar", True)
         pct = data.get("percent", 0)
+        icon_size = min(self.height - 2, 10)
+        tx = _draw_widget_icon(draw, self, icon_size)
+        avail_w = self.width - (tx - self.x)
 
         if show_bar and self.height >= 14:
-            # Label
-            draw.text((self.x, self.y), f"CPU", font=font, fill=255)
-            # Bar
-            bar_x = self.x
+            draw.text((tx, self.y), "CPU", font=font, fill=255)
+            pct_text = f"{pct:.0f}%"
+            draw.text((tx + avail_w - len(pct_text) * 6, self.y), pct_text, font=font, fill=255)
             bar_y = self.y + self.font_size + 1
-            bar_w = self.width
             bar_h = max(4, self.height - self.font_size - 2)
-            draw.rectangle([bar_x, bar_y, bar_x + bar_w, bar_y + bar_h], outline=255)
-            fill_w = int((bar_w - 2) * pct / 100)
+            draw.rectangle([tx, bar_y, tx + avail_w, bar_y + bar_h], outline=255)
+            fill_w = int((avail_w - 2) * pct / 100)
             if fill_w > 0:
                 draw.rectangle(
-                    [bar_x + 1, bar_y + 1, bar_x + 1 + fill_w, bar_y + bar_h - 1],
+                    [tx + 1, bar_y + 1, tx + 1 + fill_w, bar_y + bar_h - 1],
                     fill=255,
                 )
-            # Percentage text on right
-            pct_text = f"{pct:.0f}%"
-            draw.text((self.x + self.width - len(pct_text) * 6, self.y), pct_text, font=font, fill=255)
         else:
-            draw.text((self.x, self.y), f"CPU: {pct:.1f}%", font=font, fill=255)
+            draw.text((tx, self.y), f"CPU: {pct:.1f}%", font=font, fill=255)
 
 
 class RAMUsageWidget(Widget):
@@ -119,23 +139,26 @@ class RAMUsageWidget(Widget):
         font = self.get_font()
         fmt = self.config.get("format", "compact")
         pct = data.get("percent", 0)
+        icon_size = min(self.height - 2, 10)
+        tx = _draw_widget_icon(draw, self, icon_size)
+        avail_w = self.width - (tx - self.x)
 
         if fmt == "bar" and self.height >= 14:
-            draw.text((self.x, self.y), "RAM", font=font, fill=255)
+            draw.text((tx, self.y), "RAM", font=font, fill=255)
             pct_text = f"{pct:.0f}%"
-            draw.text((self.x + self.width - len(pct_text) * 6, self.y), pct_text, font=font, fill=255)
+            draw.text((tx + avail_w - len(pct_text) * 6, self.y), pct_text, font=font, fill=255)
             bar_y = self.y + self.font_size + 1
             bar_h = max(4, self.height - self.font_size - 2)
-            draw.rectangle([self.x, bar_y, self.x + self.width, bar_y + bar_h], outline=255)
-            fill_w = int((self.width - 2) * pct / 100)
+            draw.rectangle([tx, bar_y, tx + avail_w, bar_y + bar_h], outline=255)
+            fill_w = int((avail_w - 2) * pct / 100)
             if fill_w > 0:
                 draw.rectangle(
-                    [self.x + 1, bar_y + 1, self.x + 1 + fill_w, bar_y + bar_h - 1],
+                    [tx + 1, bar_y + 1, tx + 1 + fill_w, bar_y + bar_h - 1],
                     fill=255,
                 )
         else:
             text = f"Mem: {data['used_gb']}/{data['total_gb']}GB {pct:.0f}%"
-            draw.text((self.x, self.y), text, font=font, fill=255)
+            draw.text((tx, self.y), text, font=font, fill=255)
 
 
 class SwapUsageWidget(Widget):
@@ -173,8 +196,10 @@ class SwapUsageWidget(Widget):
 
     def render(self, draw: ImageDraw.ImageDraw, data: Any) -> None:
         font = self.get_font()
+        icon_size = min(self.height - 2, 10)
+        tx = _draw_widget_icon(draw, self, icon_size)
         text = f"Swap: {data['used_mb']}/{data['total_mb']}MB {data['percent']:.0f}%"
-        draw.text((self.x, self.y), text, font=font, fill=255)
+        draw.text((tx, self.y), text, font=font, fill=255)
 
 
 class TemperatureWidget(Widget):
@@ -199,11 +224,13 @@ class TemperatureWidget(Widget):
     def render(self, draw: ImageDraw.ImageDraw, data: Any) -> None:
         font = self.get_font()
         unit = self.config.get("unit", "C")
+        icon_size = min(self.height - 2, 10)
+        tx = _draw_widget_icon(draw, self, icon_size)
         if unit == "F":
             text = f"{data['temp_f']:.1f}°F"
         else:
             text = f"{data['temp_c']:.1f}°C"
-        draw.text((self.x, self.y), text, font=font, fill=255)
+        draw.text((tx, self.y), text, font=font, fill=255)
 
 
 class UptimeWidget(Widget):
@@ -231,13 +258,15 @@ class UptimeWidget(Widget):
     def render(self, draw: ImageDraw.ImageDraw, data: Any) -> None:
         font = self.get_font()
         d, h, m = data["days"], data["hours"], data["minutes"]
+        icon_size = min(self.height - 2, 10)
+        tx = _draw_widget_icon(draw, self, icon_size)
         if d > 0:
             text = f"Up: {d}d {h}h {m}m"
         elif h > 0:
             text = f"Up: {h}h {m}m"
         else:
             text = f"Up: {m}m"
-        draw.text((self.x, self.y), text, font=font, fill=255)
+        draw.text((tx, self.y), text, font=font, fill=255)
 
 
 class LoadAverageWidget(Widget):
@@ -265,11 +294,13 @@ class LoadAverageWidget(Widget):
     def render(self, draw: ImageDraw.ImageDraw, data: Any) -> None:
         font = self.get_font()
         fmt = self.config.get("format", "all")
+        icon_size = min(self.height - 2, 10)
+        tx = _draw_widget_icon(draw, self, icon_size)
         if fmt == "1min":
             text = f"Load: {data['load1']:.2f}"
         else:
             text = f"Load: {data['load1']:.1f} {data['load5']:.1f} {data['load15']:.1f}"
-        draw.text((self.x, self.y), text, font=font, fill=255)
+        draw.text((tx, self.y), text, font=font, fill=255)
 
 
 class HostnameWidget(Widget):
@@ -292,4 +323,6 @@ class HostnameWidget(Widget):
 
     def render(self, draw: ImageDraw.ImageDraw, data: Any) -> None:
         font = self.get_font()
-        draw.text((self.x, self.y), data["hostname"], font=font, fill=255)
+        icon_size = min(self.height - 2, 10)
+        tx = _draw_widget_icon(draw, self, icon_size)
+        draw.text((tx, self.y), data["hostname"], font=font, fill=255)

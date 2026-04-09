@@ -1,7 +1,9 @@
 flask>=2.0
 Pillow>=9.0
-adafruit-circuitpython-ssd1306>=2.12
-adafruit-blinka>=8.0
 luma.oled>=3.8
 luma.core>=2.3
+smbus2>=0.4
 RPi.GPIO>=0.7
+# Optional: adafruit stack (fallback if luma.oled is unavailable)
+# adafruit-circuitpython-ssd1306>=2.12
+# adafruit-blinka>=8.0
