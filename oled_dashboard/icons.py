@@ -158,21 +158,34 @@ def _icon_ip(draw: ImageDraw.ImageDraw, x: int, y: int, s: int):
 
 
 def _icon_network_speed(draw: ImageDraw.ImageDraw, x: int, y: int, s: int):
-    """Wi-Fi / radio waves (3 arcs + dot)."""
+    """Speedometer gauge: semicircle with needle — intuitive for speed."""
+    import math
     cx = x + s // 2
-    dot_y = y + s - 2
-    # Dot
-    _ellipse(draw, cx - 1, dot_y - 1, 3, 3, outline=255, fill=255)
-    # Arcs — draw as portions of ellipses
-    offsets = [3, 5, 7] if s >= 10 else [2, 4]
-    for off in offsets:
-        if off < s // 2:
-            ay = dot_y - off
-            _ellipse(draw, cx - off, ay - off, off * 2, off * 2, outline=255)
-            # Mask bottom half of arc (keep only top arc)
-            draw.rectangle([x, dot_y - off, x + s - 1, dot_y], fill=0)
-    # Redraw dot
-    _ellipse(draw, cx - 1, dot_y - 1, 3, 3, outline=255, fill=255)
+    cy = y + s - 2          # pivot near bottom edge
+    r  = max(3, s * 5 // 8) # gauge radius
+
+    # Top-facing semicircular arc.
+    # PIL arc goes CW from start to end.  start=180 (left) → 0 (right) passes
+    # through 270° (screen-up), so this draws the TOP semicircle.
+    draw.arc([cx - r, cy - r, cx + r, cy + r], start=180, end=0, fill=255)
+    # Baseline (flat bottom of gauge)
+    _line(draw, max(x, cx - r), cy, min(x + s - 1, cx + r), cy)
+
+    # Three tick marks at 20 %, 50 %, 80 % of the sweep
+    for pct in (0.2, 0.5, 0.8):
+        a   = math.radians(180.0 + pct * 180.0)
+        ox  = int(cx + r * math.cos(a))
+        oy  = int(cy + r * math.sin(a))
+        ix  = int(cx + (r - 2) * math.cos(a))
+        iy  = int(cy + (r - 2) * math.sin(a))
+        _line(draw, ox, oy, ix, iy)
+
+    # Needle at ~65 %
+    a  = math.radians(180.0 + 0.65 * 180.0)
+    nx = int(cx + (r - 1) * math.cos(a))
+    ny = int(cy + (r - 1) * math.sin(a))
+    _line(draw, cx, cy, nx, ny)
+    _px(draw, cx, cy)
 
 
 def _icon_ethernet(draw: ImageDraw.ImageDraw, x: int, y: int, s: int):
@@ -197,22 +210,64 @@ def _icon_ethernet(draw: ImageDraw.ImageDraw, x: int, y: int, s: int):
 
 
 def _icon_net_usage(draw: ImageDraw.ImageDraw, x: int, y: int, s: int):
-    """Up/down arrows for transfer totals."""
-    mid = s // 2
-    arr_h = max(3, s * 4 // 10)
-    arr_w = max(2, s * 3 // 10)
-    # Down arrow (left half)
-    ax = x + mid // 2
-    _line(draw, ax, y + 1, ax, y + arr_h)
-    draw.polygon([ax - arr_w // 2, y + arr_h - 1,
-                  ax + arr_w // 2, y + arr_h - 1,
-                  ax, y + arr_h + arr_w // 2], fill=255)
-    # Up arrow (right half)
-    ax2 = x + mid + mid // 2
-    _line(draw, ax2, y + s - 2, ax2, y + s - arr_h - 1)
-    draw.polygon([ax2 - arr_w // 2, y + s - arr_h + 1,
-                  ax2 + arr_w // 2, y + s - arr_h + 1,
-                  ax2, y + s - arr_h - arr_w // 2 - 1], fill=255)
+    """Data-usage meter: two stacked horizontal fill-bars (RX fuller, TX lighter)."""
+    bar_h   = max(2, s // 4)
+    gap     = max(1, s // 6)
+    total_h = bar_h * 2 + gap
+    oy      = y + (s - total_h) // 2   # vertically centre the pair
+
+    # RX bar (~70 % filled)
+    draw.rectangle([x, oy, x + s - 1, oy + bar_h - 1], outline=255)
+    fill = max(0, int((s - 2) * 0.70) - 1)
+    if fill > 0:
+        draw.rectangle([x + 1, oy + 1, x + 1 + fill, oy + bar_h - 2], fill=255)
+
+    # TX bar (~35 % filled)
+    ty = oy + bar_h + gap
+    draw.rectangle([x, ty, x + s - 1, ty + bar_h - 1], outline=255)
+    fill2 = max(0, int((s - 2) * 0.35) - 1)
+    if fill2 > 0:
+        draw.rectangle([x + 1, ty + 1, x + 1 + fill2, ty + bar_h - 2], fill=255)
+
+
+def _icon_pihole(draw: ImageDraw.ImageDraw, x: int, y: int, s: int):
+    """Shield icon representing Pi-hole's ad-blocking protection."""
+    cx   = x + s // 2
+    # Shield is a pentagon: flat top, angled sides, pointed bottom
+    left  = x + max(1, s // 8)
+    right = x + s - 1 - max(1, s // 8)
+    mid_y = y + s * 3 // 5        # where sides start converging to point
+    pts   = [
+        left,  y,                  # top-left
+        right, y,                  # top-right
+        right, mid_y,              # right-mid
+        cx,    y + s - 1,          # bottom point
+        left,  mid_y,              # left-mid
+    ]
+    draw.polygon(pts, outline=255, fill=0)
+    # Small filled dot in the centre as the Pi-hole "eye"
+    dot_y = y + s * 2 // 5
+    draw.rectangle([cx - 1, dot_y - 1, cx + 1, dot_y + 1], fill=255)
+
+
+def _icon_pihole_summary(draw: ImageDraw.ImageDraw, x: int, y: int, s: int):
+    """Shield with a bar inside — summary view."""
+    _icon_pihole(draw, x, y, s)
+
+
+def _icon_pihole_block_rate(draw: ImageDraw.ImageDraw, x: int, y: int, s: int):
+    """Shield with block indicator."""
+    _icon_pihole(draw, x, y, s)
+
+
+def _icon_pihole_queries(draw: ImageDraw.ImageDraw, x: int, y: int, s: int):
+    """Shield for query count."""
+    _icon_pihole(draw, x, y, s)
+
+
+def _icon_pihole_clients(draw: ImageDraw.ImageDraw, x: int, y: int, s: int):
+    """Shield for client count."""
+    _icon_pihole(draw, x, y, s)
 
 
 def _icon_disk(draw: ImageDraw.ImageDraw, x: int, y: int, s: int):
@@ -335,31 +390,36 @@ def _icon_swap(draw: ImageDraw.ImageDraw, x: int, y: int, s: int):
 # ── Registry ───────────────────────────────────────────────────────────
 
 _ICON_MAP = {
-    "cpu_usage":    _icon_lightning,
-    "ram_usage":    _icon_ram,
-    "swap_usage":   _icon_swap,
-    "temperature":  _icon_temperature,
-    "uptime":       _icon_uptime,
-    "load_avg":     _icon_load,
-    "hostname":     _icon_hostname,
-    "ip_address":   _icon_ip,
-    "net_speed":    _icon_network_speed,
-    "net_usage":    _icon_net_usage,
-    "disk_space":   _icon_disk,
-    "disk_io":      _icon_disk_io,
-    "static_text":  _icon_text,
-    "hline":        _icon_hline,
-    "vline":        _icon_vline,
-    "box":          _icon_box,
-    "progress_bar": _icon_progress,
-    "datetime":     _icon_datetime,
+    "cpu_usage":         _icon_lightning,
+    "ram_usage":         _icon_ram,
+    "swap_usage":        _icon_swap,
+    "temperature":       _icon_temperature,
+    "uptime":            _icon_uptime,
+    "load_avg":          _icon_load,
+    "hostname":          _icon_hostname,
+    "ip_address":        _icon_ip,
+    "net_speed":         _icon_network_speed,
+    "net_usage":         _icon_net_usage,
+    "disk_space":        _icon_disk,
+    "disk_io":           _icon_disk_io,
+    "static_text":       _icon_text,
+    "hline":             _icon_hline,
+    "vline":             _icon_vline,
+    "box":               _icon_box,
+    "progress_bar":      _icon_progress,
+    "datetime":          _icon_datetime,
+    # Pi-hole widgets
+    "pihole_summary":    _icon_pihole_summary,
+    "pihole_block_rate": _icon_pihole_block_rate,
+    "pihole_queries":    _icon_pihole_queries,
+    "pihole_clients":    _icon_pihole_clients,
     # aliases
-    "cpu":          _icon_lightning,
-    "ram":          _icon_ram,
-    "temp":         _icon_temperature,
-    "network":      _icon_ethernet,
-    "ethernet":     _icon_ethernet,
-    "disk":         _icon_disk,
+    "cpu":               _icon_lightning,
+    "ram":               _icon_ram,
+    "temp":              _icon_temperature,
+    "network":           _icon_ethernet,
+    "ethernet":          _icon_ethernet,
+    "disk":              _icon_disk,
 }
 
 

@@ -40,6 +40,8 @@
         net_speed: '📶', net_usage: '📡', disk_space: '💿', disk_io: '📀',
         static_text: 'Aa', hline: '─', vline: '│', box: '□',
         progress_bar: '▓', datetime: '🕐',
+        // Pi-hole
+        pihole_summary: '🛡', pihole_block_rate: '🛡', pihole_queries: '🛡', pihole_clients: '🛡',
     };
 
     // Widgets that support the show_icon config option
@@ -47,6 +49,7 @@
         'cpu_usage', 'ram_usage', 'swap_usage', 'temperature', 'uptime',
         'load_avg', 'hostname', 'ip_address', 'net_speed', 'net_usage',
         'disk_space', 'disk_io',
+        'pihole_summary', 'pihole_block_rate', 'pihole_queries', 'pihole_clients',
     ]);
 
     // ── API helpers ────────────────────────────────────────────
@@ -77,6 +80,17 @@
             // Load widget catalog
             const categories = await api('GET', '/api/widgets/categories');
             populateWidgetPalette(categories);
+
+            // Check Pi-hole availability and annotate its category if present
+            try {
+                const ph = await api('GET', '/api/pihole/status');
+                if (!ph.available && categories['pihole']) {
+                    // Pi-hole widgets are registered but host detection says not present:
+                    // leave them visible but add a warning note in the palette header.
+                    const phHeader = document.querySelector('.category-header-pihole');
+                    if (phHeader) phHeader.title = 'Pi-hole not detected – widgets will show 0s until the service is running';
+                }
+            } catch (_) { /* non-fatal */ }
 
             // Load current config
             const config = await api('GET', '/api/config');
@@ -146,8 +160,11 @@
         container.innerHTML = '';
         state.availableWidgets = [];
 
-        const order = ['system', 'network', 'storage', 'general'];
-        const catNames = { system: 'System', network: 'Network', storage: 'Storage', general: 'General' };
+        const order = ['system', 'network', 'storage', 'pihole', 'general'];
+        const catNames = {
+            system: 'System', network: 'Network', storage: 'Storage',
+            pihole: '🛡 Pi-hole', general: 'General',
+        };
 
         order.forEach(cat => {
             const widgets = categories[cat];
@@ -157,7 +174,7 @@
             catDiv.className = `widget-category cat-${cat}`;
 
             const header = document.createElement('div');
-            header.className = 'category-header';
+            header.className = `category-header category-header-${cat}`;
             header.textContent = catNames[cat] || cat;
             catDiv.appendChild(header);
 
@@ -414,20 +431,26 @@
     function buildConfigFields(w) {
         // Widget-specific config fields
         const widgetConfigs = {
-            cpu_usage:    [{ key: 'show_bar',    label: 'Show Bar',    type: 'checkbox' }],
-            ram_usage:    [{ key: 'format',      label: 'Format',      type: 'select', options: ['compact', 'bar'] }],
-            temperature:  [{ key: 'unit',        label: 'Unit',        type: 'select', options: ['C', 'F'] }],
+            cpu_usage:    [{ key: 'show_bar',  label: 'Show Bar', type: 'checkbox' }],
+            ram_usage:    [],   // layout auto-selects combined/compact based on widget height
+            temperature:  [{ key: 'unit',      label: 'Unit',     type: 'select', options: ['C', 'F'] }],
             disk_space:   [
-                { key: 'mount_point', label: 'Mount',    type: 'text', default: '/' },
-                { key: 'show_bar',    label: 'Show Bar', type: 'checkbox' },
+                { key: 'mount_point', label: 'Mount', type: 'text',   default: '/' },
+                { key: 'units',       label: 'Units', type: 'select', options: ['MB', 'GB', 'TB'], default: 'GB' },
             ],
             static_text:  [{ key: 'text',    label: 'Text',   type: 'text',   default: 'Hello' }],
             datetime:     [{ key: 'format',  label: 'Format', type: 'select', options: ['time', 'date', 'datetime', 'short_time'] }],
             ip_address:   [{ key: 'show_label', label: 'Show Label', type: 'checkbox' }],
             net_speed:    [{ key: 'interface', label: 'Interface', type: 'text', default: '' }],
+            net_usage:    [{ key: 'interface', label: 'Interface', type: 'text', default: '' }],
             load_avg:     [{ key: 'format', label: 'Format', type: 'select', options: ['all', '1min'] }],
             box:          [{ key: 'filled', label: 'Filled', type: 'checkbox' }],
             progress_bar: [{ key: 'value', label: 'Value %', type: 'number', min: 0, max: 100 }],
+            // Pi-hole widgets (api_key is optional — required only if auth is enabled in Pi-hole v6)
+            pihole_summary:    [{ key: 'api_key', label: 'API Key (opt)', type: 'text', default: '' }],
+            pihole_block_rate: [{ key: 'api_key', label: 'API Key (opt)', type: 'text', default: '' }],
+            pihole_queries:    [{ key: 'api_key', label: 'API Key (opt)', type: 'text', default: '' }],
+            pihole_clients:    [{ key: 'api_key', label: 'API Key (opt)', type: 'text', default: '' }],
         };
 
         // Collect all fields for this widget type

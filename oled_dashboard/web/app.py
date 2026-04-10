@@ -276,4 +276,16 @@ def create_app(config_manager: ConfigManager = None, renderer: DisplayRenderer =
         renderer.start()
         return jsonify({"status": "ok", "running": True})
 
+    # ── Pi-hole integration status ─────────────────────────────────────
+
+    @app.route("/api/pihole/status", methods=["GET"])
+    def api_pihole_status():
+        """Return whether Pi-hole is detected on this host."""
+        try:
+            from oled_dashboard.widgets.pihole_widgets import is_pihole_available
+            available = is_pihole_available()
+        except Exception:
+            available = False
+        return jsonify({"available": available})
+
     return app

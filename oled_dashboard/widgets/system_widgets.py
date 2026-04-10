@@ -10,6 +10,17 @@ from PIL import ImageDraw
 from oled_dashboard.widgets.base import Widget
 
 
+def _measure_text(font, text: str) -> int:
+    """Return pixel width of *text* rendered with *font* (PIL ≥9.2 + older)."""
+    try:
+        return int(font.getlength(text))
+    except AttributeError:
+        try:
+            return font.getsize(text)[0]
+        except Exception:
+            return len(text) * 6
+
+
 def _icon_offset(widget, icon_size: int) -> Tuple[int, int]:
     """Return (text_x, icon_y) for a widget with icon support."""
     show_icon = widget.config.get("show_icon", True)
@@ -21,12 +32,20 @@ def _icon_offset(widget, icon_size: int) -> Tuple[int, int]:
     return widget.x, widget.y
 
 
-def _draw_widget_icon(draw: ImageDraw.ImageDraw, widget, icon_size: int):
-    """Draw the widget's icon if enabled. Returns text_x offset."""
+def _draw_widget_icon(draw: ImageDraw.ImageDraw, widget, icon_size: int,
+                      line_y: Optional[int] = None, line_h: Optional[int] = None):
+    """Draw the widget's icon if enabled. Returns text_x offset.
+
+    *line_y* / *line_h*: if provided, the icon is vertically centred within
+    that specific line rather than the full widget height (useful for the top
+    line of a multi-line combined layout).
+    """
     show_icon = widget.config.get("show_icon", True)
     if show_icon and widget.width > icon_size + 20:
         from oled_dashboard.icons import draw_icon, icon_width as _iw
-        icon_y = widget.y + max(0, (widget.height - icon_size) // 2)
+        ref_y = line_y if line_y is not None else widget.y
+        ref_h = line_h if line_h is not None else widget.height
+        icon_y = ref_y + max(0, (ref_h - icon_size) // 2)
         draw_icon(draw, widget.WIDGET_ID, widget.x, icon_y, size=icon_size)
         return widget.x + _iw(icon_size)
     return widget.x
@@ -78,25 +97,33 @@ class CPUUsageWidget(Widget):
         font = self.get_font()
         show_bar = self.config.get("show_bar", True)
         pct = data.get("percent", 0)
-        icon_size = min(self.height - 2, 10)
-        tx = _draw_widget_icon(draw, self, icon_size)
-        avail_w = self.width - (tx - self.x)
+        pct_text = f"{pct:.0f}%"
 
         if show_bar and self.height >= 14:
+            first_h = self.font_size + 2
+            icon_size = min(first_h - 2, 12)
+            tx = _draw_widget_icon(draw, self, icon_size,
+                                   line_y=self.y, line_h=first_h)
+            avail_w = self.width - (tx - self.x)
+            # Line 1: label
             draw.text((tx, self.y), "CPU", font=font, fill=255)
-            pct_text = f"{pct:.0f}%"
-            draw.text((tx + avail_w - len(pct_text) * 6, self.y), pct_text, font=font, fill=255)
-            bar_y = self.y + self.font_size + 1
-            bar_h = max(4, self.height - self.font_size - 2)
-            draw.rectangle([tx, bar_y, tx + avail_w, bar_y + bar_h], outline=255)
-            fill_w = int((avail_w - 2) * pct / 100)
+            # Line 2: bar + % at right end
+            bar_y = self.y + first_h
+            bar_h = max(3, self.height - first_h - 1)
+            pct_w = _measure_text(font, pct_text) + 2
+            bar_w = self.width - pct_w - 1
+            draw.rectangle([self.x, bar_y, self.x + bar_w, bar_y + bar_h], outline=255)
+            fill_w = int((bar_w - 2) * pct / 100)
             if fill_w > 0:
                 draw.rectangle(
-                    [tx + 1, bar_y + 1, tx + 1 + fill_w, bar_y + bar_h - 1],
+                    [self.x + 1, bar_y + 1, self.x + 1 + fill_w, bar_y + bar_h - 1],
                     fill=255,
                 )
+            draw.text((self.x + bar_w + 2, bar_y), pct_text, font=font, fill=255)
         else:
-            draw.text((tx, self.y), f"CPU: {pct:.1f}%", font=font, fill=255)
+            icon_size = min(self.height - 2, 14)
+            tx = _draw_widget_icon(draw, self, icon_size)
+            draw.text((tx, self.y), f"CPU:{pct:.1f}%", font=font, fill=255)
 
 
 class RAMUsageWidget(Widget):
@@ -137,28 +164,35 @@ class RAMUsageWidget(Widget):
 
     def render(self, draw: ImageDraw.ImageDraw, data: Any) -> None:
         font = self.get_font()
-        fmt = self.config.get("format", "compact")
         pct = data.get("percent", 0)
-        icon_size = min(self.height - 2, 10)
-        tx = _draw_widget_icon(draw, self, icon_size)
-        avail_w = self.width - (tx - self.x)
+        pct_text = f"{pct:.0f}%"
+        mem_text = f"Mem:{data['used_gb']}/{data['total_gb']}G"
 
-        if fmt == "bar" and self.height >= 14:
-            draw.text((tx, self.y), "RAM", font=font, fill=255)
-            pct_text = f"{pct:.0f}%"
-            draw.text((tx + avail_w - len(pct_text) * 6, self.y), pct_text, font=font, fill=255)
-            bar_y = self.y + self.font_size + 1
-            bar_h = max(4, self.height - self.font_size - 2)
-            draw.rectangle([tx, bar_y, tx + avail_w, bar_y + bar_h], outline=255)
-            fill_w = int((avail_w - 2) * pct / 100)
+        if self.height >= 18:
+            # Two-line combined view: text on line 1, bar+% on line 2
+            first_h = self.font_size + 2
+            icon_size = min(first_h - 2, 12)
+            tx = _draw_widget_icon(draw, self, icon_size,
+                                   line_y=self.y, line_h=first_h)
+            draw.text((tx, self.y), mem_text, font=font, fill=255)
+            # Bar + %
+            bar_y = self.y + first_h
+            bar_h = max(3, self.height - first_h - 1)
+            pct_w = _measure_text(font, pct_text) + 2
+            bar_w = self.width - pct_w - 1
+            draw.rectangle([self.x, bar_y, self.x + bar_w, bar_y + bar_h], outline=255)
+            fill_w = int((bar_w - 2) * pct / 100)
             if fill_w > 0:
                 draw.rectangle(
-                    [tx + 1, bar_y + 1, tx + 1 + fill_w, bar_y + bar_h - 1],
+                    [self.x + 1, bar_y + 1, self.x + 1 + fill_w, bar_y + bar_h - 1],
                     fill=255,
                 )
+            draw.text((self.x + bar_w + 2, bar_y), pct_text, font=font, fill=255)
         else:
-            text = f"Mem: {data['used_gb']}/{data['total_gb']}GB {pct:.0f}%"
-            draw.text((tx, self.y), text, font=font, fill=255)
+            # Single line: compact text
+            icon_size = min(self.height - 2, 14)
+            tx = _draw_widget_icon(draw, self, icon_size)
+            draw.text((tx, self.y), mem_text, font=font, fill=255)
 
 
 class SwapUsageWidget(Widget):

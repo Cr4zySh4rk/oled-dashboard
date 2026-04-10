@@ -39,7 +39,7 @@ class WidgetRegistry:
 
     @classmethod
     def _ensure_registered(cls):
-        """Register all built-in widgets."""
+        """Register all built-in widgets, plus optional service widgets."""
         if cls._widgets:
             return
 
@@ -69,6 +69,18 @@ class WidgetRegistry:
         ]
         for w in builtin:
             cls._widgets[w.WIDGET_ID] = w
+
+        # ── Conditionally register Pi-hole widgets ────────────────────
+        try:
+            from oled_dashboard.widgets.pihole_widgets import (
+                is_pihole_available,
+                PIHOLE_WIDGETS,
+            )
+            if is_pihole_available():
+                for w in PIHOLE_WIDGETS:
+                    cls._widgets[w.WIDGET_ID] = w
+        except ImportError:
+            pass  # pihole_widgets module not present — skip silently
 
     @classmethod
     def get_widget_class(cls, widget_id: str) -> Optional[Type[Widget]]:

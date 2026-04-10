@@ -11,12 +11,26 @@ from PIL import ImageDraw
 from oled_dashboard.widgets.base import Widget
 
 
-def _draw_widget_icon(draw: ImageDraw.ImageDraw, widget, icon_size: int) -> int:
+def _measure_text(font, text: str) -> int:
+    """Return pixel width of *text* rendered with *font* (PIL ≥9.2 + older)."""
+    try:
+        return int(font.getlength(text))
+    except AttributeError:
+        try:
+            return font.getsize(text)[0]
+        except Exception:
+            return len(text) * 6
+
+
+def _draw_widget_icon(draw: ImageDraw.ImageDraw, widget, icon_size: int,
+                      line_y: int = None, line_h: int = None) -> int:
     """Draw the widget's icon if enabled. Returns text_x offset."""
     show_icon = widget.config.get("show_icon", True)
     if show_icon and widget.width > icon_size + 20:
         from oled_dashboard.icons import draw_icon, icon_width as _iw
-        icon_y = widget.y + max(0, (widget.height - icon_size) // 2)
+        ref_y = line_y if line_y is not None else widget.y
+        ref_h = line_h if line_h is not None else widget.height
+        icon_y = ref_y + max(0, (ref_h - icon_size) // 2)
         draw_icon(draw, widget.WIDGET_ID, widget.x, icon_y, size=icon_size)
         return widget.x + _iw(icon_size)
     return widget.x
@@ -152,17 +166,21 @@ class NetworkSpeedWidget(Widget):
 
     def render(self, draw: ImageDraw.ImageDraw, data: Any) -> None:
         font = self.get_font()
-        rx = self._format_speed(data["rx_speed"])
-        tx = self._format_speed(data["tx_speed"])
-        iface = data["interface"]
-        icon_size = min(self.height - 2, 10)
-        tx_x = _draw_widget_icon(draw, self, icon_size)
+        rx_str  = self._format_speed(data["rx_speed"])
+        tx_str  = self._format_speed(data["tx_speed"])
+        line_h  = self.font_size + 2
 
-        if self.height >= 24:
-            draw.text((tx_x, self.y), f"{iface}:", font=font, fill=255)
-            draw.text((tx_x, self.y + self.font_size + 1), f"↓{rx} ↑{tx}", font=font, fill=255)
+        if self.height >= line_h * 2:
+            # Two-line layout: ↓ speed / ↑ speed
+            icon_size = min(line_h - 2, 12)
+            ix = _draw_widget_icon(draw, self, icon_size,
+                                   line_y=self.y, line_h=line_h)
+            draw.text((ix, self.y),           f"\u2193 {rx_str}", font=font, fill=255)
+            draw.text((ix, self.y + line_h),  f"\u2191 {tx_str}", font=font, fill=255)
         else:
-            draw.text((tx_x, self.y), f"↓{rx} ↑{tx}", font=font, fill=255)
+            icon_size = min(self.height - 2, 14)
+            ix = _draw_widget_icon(draw, self, icon_size)
+            draw.text((ix, self.y), f"\u2193{rx_str} \u2191{tx_str}", font=font, fill=255)
 
 
 class NetworkUsageWidget(Widget):
@@ -201,8 +219,19 @@ class NetworkUsageWidget(Widget):
             return {"rx_gb": 0, "tx_gb": 0, "interface": iface or "unknown"}
 
     def render(self, draw: ImageDraw.ImageDraw, data: Any) -> None:
-        font = self.get_font()
-        icon_size = min(self.height - 2, 10)
-        tx = _draw_widget_icon(draw, self, icon_size)
-        text = f"↓{data['rx_gb']}G ↑{data['tx_gb']}G"
-        draw.text((tx, self.y), text, font=font, fill=255)
+        font   = self.get_font()
+        rx_str = f"{data['rx_gb']:.2f}G"
+        tx_str = f"{data['tx_gb']:.2f}G"
+        line_h = self.font_size + 2
+
+        if self.height >= line_h * 2:
+            # Two-line layout: RX / TX
+            icon_size = min(line_h - 2, 12)
+            ix = _draw_widget_icon(draw, self, icon_size,
+                                   line_y=self.y, line_h=line_h)
+            draw.text((ix, self.y),          f"\u2193 {rx_str}", font=font, fill=255)
+            draw.text((ix, self.y + line_h), f"\u2191 {tx_str}", font=font, fill=255)
+        else:
+            icon_size = min(self.height - 2, 14)
+            ix = _draw_widget_icon(draw, self, icon_size)
+            draw.text((ix, self.y), f"\u2193{rx_str} \u2191{tx_str}", font=font, fill=255)
