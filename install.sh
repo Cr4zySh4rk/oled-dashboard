@@ -188,7 +188,7 @@ setup_python_env() {
 
     # ── Core dependencies ────────────────────────────────────────────────────
     log_info "Installing core dependencies..."
-    pip install psutil flask 2>/dev/null
+    pip install psutil flask requests 2>/dev/null
 
     # Pillow: prefer apt-installed python3-pil (already via system-site-packages),
     # but install via pip as well for the venv in case apt version is old

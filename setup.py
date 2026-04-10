@@ -25,6 +25,7 @@ setup(
     install_requires=[
         "flask>=2.0",
         "Pillow>=9.0",
+        "requests>=2.28",
         "adafruit-circuitpython-ssd1306>=2.12",
         "adafruit-blinka>=8.0",
         "luma.oled>=3.8",

@@ -66,7 +66,7 @@ def _auth_pihole(password: str, base_url: str) -> Optional[Dict[str, str]]:
         r = requests.post(
             f"{base_url}/api/auth",
             json={"password": password},
-            timeout=3,
+            timeout=5,   # generous timeout for Pi Zero
         )
         if r.status_code == 200:
             sess = r.json().get("session", {})
@@ -126,7 +126,14 @@ def _fetch_pihole_data(password: str = "",
 
     data = _empty_data()
     try:
-        import requests
+        try:
+            import requests
+        except ImportError:
+            log.error(
+                "Pi-hole widgets require the 'requests' library. "
+                "Install it with: pip install requests"
+            )
+            return data
 
         session = _get_session(password, base_url)
 
@@ -135,7 +142,7 @@ def _fetch_pihole_data(password: str = "",
         def _get(url: str, **kw) -> "requests.Response":
             if session:
                 kw.setdefault("json", session)
-            return requests.get(url, timeout=3, **kw)
+            return requests.get(url, timeout=5, **kw)   # longer timeout for Pi Zero
 
         r = _get(f"{base_url}/api/stats/summary")
 

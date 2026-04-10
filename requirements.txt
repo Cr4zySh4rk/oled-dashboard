@@ -18,6 +18,10 @@ adafruit-circuitpython-ssd1306>=2.12
 # ── System stats ───────────────────────────────────────────────────────────────
 psutil>=5.9
 
+# ── Pi-hole integration ────────────────────────────────────────────────────────
+# Required for Pi-hole widget API calls (Pi-hole v6 session auth)
+requests>=2.28
+
 # ── Fallback OLED stack (used if adafruit/Blinka unavailable, e.g. DietPi) ────
 luma.oled>=3.8
 luma.core>=2.3
