@@ -1,29 +1,36 @@
 """
-Pi-hole monitoring widgets.
+Pi-hole monitoring widgets — Pi-hole v6 API.
 
-These widgets are only registered when Pi-hole is detected on the system
-(via /etc/pihole directory, the pihole binary, or a reachable local API).
+Authentication flow (matches https://github.com/RPiSpy/pi-hole-screen):
+  1. POST  /api/auth   {"password": "<password>"}
+       → {"session": {"sid": "...", "csrf": "..."}}
+  2. GET   /api/stats/summary   json={"sid": "...", "csrf": "..."}
+  3. GET   /api/dns/blocking    json={"sid": "...", "csrf": "..."}
+  Sessions last ~5 minutes; we refresh after 4 minutes automatically.
 
-Supports both Pi-hole v6 API  (/api/stats/summary)
-         and Pi-hole v5 API  (/admin/api.php?summaryRaw).
+Pi-hole with no password set: requests succeed without a session body.
+
+These widgets are only registered by the widget registry when Pi-hole is
+detected on the host (see is_pihole_available()).
 """
 
 import os
 import time
 import subprocess
+import logging
 from typing import Any, Dict, Optional
 from PIL import ImageDraw
 from oled_dashboard.widgets.base import Widget
 
+log = logging.getLogger(__name__)
 
-# ── Detection ──────────────────────────────────────────────────────────────
+
+# ── Detection ───────────────────────────────────────────────────────────────
 
 def is_pihole_available() -> bool:
     """Return True if Pi-hole appears to be installed on this system."""
-    # Fastest check: config directory
     if os.path.isdir("/etc/pihole"):
         return True
-    # Fallback: binary in PATH
     try:
         subprocess.run(
             ["pihole", "version"],
@@ -37,80 +44,145 @@ def is_pihole_available() -> bool:
     return False
 
 
-# ── Shared API helper ───────────────────────────────────────────────────────
+# ── Session cache (shared across all widget instances) ──────────────────────
 
-# Simple module-level cache: (timestamp, data_dict)
-_pihole_cache: Dict[str, Any] = {}
-_CACHE_TTL = 10.0  # seconds
+# Keyed by "base_url:password" so different Pi-hole hosts/passwords don't
+# collide.
+_sessions: Dict[str, Dict[str, Any]] = {}
+_SESSION_TTL = 240.0   # refresh 1 minute before Pi-hole's 5-minute default
+
+# Data cache: keyed by "base_url:password"
+_data_cache: Dict[str, Dict[str, Any]] = {}
+_DATA_TTL = 10.0       # fetch fresh stats every 10 seconds
 
 
-def _fetch_pihole_data(api_key: str = "") -> Dict[str, Any]:
+def _auth_pihole(password: str, base_url: str) -> Optional[Dict[str, str]]:
     """
-    Fetch summary stats from the Pi-hole API.
-
-    Tries v6 first (/api/stats/summary), then falls back to v5
-    (/admin/api.php?summaryRaw).  Results are cached for _CACHE_TTL seconds
-    so multiple widgets on the same page share one network request.
+    POST to /api/auth to create a new Pi-hole session.
+    Returns {"sid": ..., "csrf": ...} or None on failure.
     """
+    try:
+        import requests
+        r = requests.post(
+            f"{base_url}/api/auth",
+            json={"password": password},
+            timeout=3,
+        )
+        if r.status_code == 200:
+            sess = r.json().get("session", {})
+            sid  = sess.get("sid")
+            csrf = sess.get("csrf")
+            if sid and csrf:
+                log.debug("Pi-hole: new session created")
+                return {"sid": sid, "csrf": csrf}
+        log.warning("Pi-hole auth failed: HTTP %s", r.status_code)
+    except Exception as exc:
+        log.warning("Pi-hole auth error: %s", exc)
+    return None
+
+
+def _get_session(password: str, base_url: str) -> Optional[Dict[str, str]]:
+    """
+    Return a valid session dict, (re-)authenticating as needed.
+    Returns None when no password is configured (unauthenticated mode).
+    """
+    if not password:
+        return None   # Pi-hole has no password → skip auth entirely
+
+    cache_key = f"{base_url}:{password}"
     now = time.time()
-    if _pihole_cache.get("ts", 0) + _CACHE_TTL > now:
-        return _pihole_cache.get("data", _empty_data())
+    cached = _sessions.get(cache_key, {})
+
+    if cached.get("sid") and now < cached.get("expires", 0):
+        return {"sid": cached["sid"], "csrf": cached["csrf"]}
+
+    # Need a fresh session
+    sess = _auth_pihole(password, base_url)
+    if sess:
+        _sessions[cache_key] = {
+            "sid":     sess["sid"],
+            "csrf":    sess["csrf"],
+            "expires": now + _SESSION_TTL,
+        }
+        return {"sid": sess["sid"], "csrf": sess["csrf"]}
+
+    return None
+
+
+def _fetch_pihole_data(password: str = "",
+                       base_url: str = "http://localhost") -> Dict[str, Any]:
+    """
+    Fetch Pi-hole summary stats, using the correct v6 session-auth flow.
+
+    Results are cached for _DATA_TTL seconds so every widget on the page
+    shares a single network request.
+    """
+    cache_key = f"{base_url}:{password}"
+    now = time.time()
+
+    cached = _data_cache.get(cache_key, {})
+    if cached.get("ts", 0) + _DATA_TTL > now:
+        return cached.get("data", _empty_data())
 
     data = _empty_data()
     try:
         import requests
 
-        # ── Pi-hole v6 API ─────────────────────────────────────────────
-        headers = {}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-        r = requests.get(
-            "http://localhost/api/stats/summary",
-            headers=headers,
-            timeout=2,
-        )
+        session = _get_session(password, base_url)
+
+        # Session is passed as a JSON body on every GET request.
+        # For unauthenticated Pi-hole, session is None → send no body.
+        def _get(url: str, **kw) -> "requests.Response":
+            if session:
+                kw.setdefault("json", session)
+            return requests.get(url, timeout=3, **kw)
+
+        r = _get(f"{base_url}/api/stats/summary")
+
+        # If the session expired mid-flight, re-auth once and retry
+        if r.status_code in (401, 403) and password:
+            log.debug("Pi-hole session expired — re-authenticating")
+            cache_key_sess = f"{base_url}:{password}"
+            _sessions.pop(cache_key_sess, None)   # invalidate cached session
+            session = _get_session(password, base_url)
+            r = _get(f"{base_url}/api/stats/summary")
+
         if r.status_code == 200:
             j = r.json()
-            queries    = j.get("queries",  {})
-            clients_d  = j.get("clients",  {})
+            queries  = j.get("queries",  {})
+            clients_ = j.get("clients",  {})
+
             data = {
-                "queries_total":   int(queries.get("total",   0)),
-                "queries_blocked": int(queries.get("blocked", 0)),
-                "percent_blocked": float(queries.get("percent_blocked", 0)),
-                "clients":         int(clients_d.get("total", 0)),
-                "status":          j.get("status", {}).get("dns", {}).get("status", "unknown"),
-                "api_version":     6,
+                "queries_total":   int(queries.get("total",           0)),
+                "queries_blocked": int(queries.get("blocked",         0)),
+                "percent_blocked": float(queries.get("percent_blocked", 0.0)),
+                "unique_domains":  int(queries.get("unique_domains",  0)),
+                "cached":          int(queries.get("cached",          0)),
+                "forwarded":       int(queries.get("forwarded",       0)),
+                "frequency":       round(float(queries.get("frequency", 0.0)), 2),
+                # clients may be dict {"total": N, "active": M} or absent
+                "clients": (
+                    int(clients_.get("total", 0))
+                    if isinstance(clients_, dict) else 0
+                ),
+                "status":      "enabled",
+                "api_version": 6,
             }
+
+            # Blocking status (optional — don't let this failure kill data)
+            try:
+                rb = _get(f"{base_url}/api/dns/blocking")
+                if rb.status_code == 200:
+                    data["status"] = rb.json().get("blocking", "enabled")
+            except Exception:
+                pass
         else:
-            raise ValueError(f"v6 status {r.status_code}")
+            log.warning("Pi-hole summary returned HTTP %s", r.status_code)
 
-    except Exception:
-        # ── Pi-hole v5 API fallback ───────────────────────────────────
-        try:
-            import requests
-            params = {"summaryRaw": "", "auth": api_key} if api_key else {"summaryRaw": ""}
-            r = requests.get(
-                "http://localhost/admin/api.php",
-                params=params,
-                timeout=2,
-            )
-            j = r.json()
-            total   = int(j.get("dns_queries_today",     0))
-            blocked = int(j.get("ads_blocked_today",     0))
-            pct     = float(j.get("ads_percentage_today", 0))
-            data = {
-                "queries_total":   total,
-                "queries_blocked": blocked,
-                "percent_blocked": pct,
-                "clients":         int(j.get("unique_clients", 0)),
-                "status":          j.get("status", "unknown"),
-                "api_version":     5,
-            }
-        except Exception:
-            data = _empty_data()
+    except Exception as exc:
+        log.warning("Pi-hole fetch error: %s", exc)
 
-    _pihole_cache["ts"]   = now
-    _pihole_cache["data"] = data
+    _data_cache[cache_key] = {"ts": now, "data": data}
     return data
 
 
@@ -119,22 +191,17 @@ def _empty_data() -> Dict[str, Any]:
         "queries_total":   0,
         "queries_blocked": 0,
         "percent_blocked": 0.0,
+        "unique_domains":  0,
+        "cached":          0,
+        "forwarded":       0,
+        "frequency":       0.0,
         "clients":         0,
         "status":          "error",
-        "api_version":     0,
+        "api_version":     6,
     }
 
 
-def _fmt_count(n: int) -> str:
-    """Compact number formatter: 1234 → '1234', 12345 → '12.3K', 1234567 → '1.2M'."""
-    if n >= 1_000_000:
-        return f"{n / 1_000_000:.1f}M"
-    if n >= 10_000:
-        return f"{n / 1_000:.1f}K"
-    return str(n)
-
-
-# ── Shared drawing helpers (duplicated from other modules to stay self-contained)
+# ── Shared drawing helpers ───────────────────────────────────────────────────
 
 def _measure_text(font, text: str) -> int:
     try:
@@ -152,23 +219,39 @@ def _draw_pihole_icon(draw: ImageDraw.ImageDraw, widget, icon_size: int,
     show_icon = widget.config.get("show_icon", True)
     if show_icon and widget.width > icon_size + 20:
         from oled_dashboard.icons import draw_icon, icon_width as _iw
-        ref_y = line_y if line_y is not None else widget.y
-        ref_h = line_h if line_h is not None else widget.height
+        ref_y  = line_y if line_y is not None else widget.y
+        ref_h  = line_h if line_h is not None else widget.height
         icon_y = ref_y + max(0, (ref_h - icon_size) // 2)
         draw_icon(draw, widget.WIDGET_ID, widget.x, icon_y, size=icon_size)
         return widget.x + _iw(icon_size)
     return widget.x
 
 
-# ── Widgets ────────────────────────────────────────────────────────────────
+def _fmt_count(n: int) -> str:
+    """Compact number: 999→'999', 12345→'12.3K', 1234567→'1.2M'."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 10_000:
+        return f"{n / 1_000:.1f}K"
+    return str(n)
+
+
+def _widget_data(widget) -> Dict[str, Any]:
+    """Convenience: read password + base_url from widget config and fetch."""
+    password = widget.config.get("password", "")
+    base_url = widget.config.get("base_url", "http://localhost").rstrip("/")
+    return _fetch_pihole_data(password, base_url)
+
+
+# ── Widgets ─────────────────────────────────────────────────────────────────
 
 class PiholeSummaryWidget(Widget):
     """
-    Pi-hole summary: queries blocked + block rate.
+    Pi-hole summary: blocked count, total queries, block rate bar.
 
-    Tall (≥ 18 px):  line 1 = "Pi: <queries> blk"
-                     line 2 = [bar] <pct>% · <N> clients
-    Short:           "Pi:<blk>/<tot> <pct>%"
+    Tall (≥ 18 px):  line 1 = [icon] "Pi: <blk> blk / <tot>"
+                     line 2 = [bar] <pct>%  <N>cl
+    Short:           [icon] "Pi:<blk>/<tot> <pct>%"
     """
 
     WIDGET_ID        = "pihole_summary"
@@ -176,12 +259,11 @@ class PiholeSummaryWidget(Widget):
     WIDGET_CATEGORY  = "pihole"
     DEFAULT_SIZE     = (128, 24)
     MIN_SIZE         = (64, 12)
-    DESCRIPTION      = "Pi-hole: total queries, blocked count, and block rate"
+    DESCRIPTION      = "Pi-hole: blocked count, total queries, and block rate bar"
     REFRESH_INTERVAL = 10.0
 
     def fetch_data(self) -> Dict[str, Any]:
-        api_key = self.config.get("api_key", "")
-        return _fetch_pihole_data(api_key)
+        return _widget_data(self)
 
     def render(self, draw: ImageDraw.ImageDraw, data: Any) -> None:
         font     = self.get_font()
@@ -196,15 +278,14 @@ class PiholeSummaryWidget(Widget):
             icon_size = min(first_h - 2, 12)
             tx = _draw_pihole_icon(draw, self, icon_size,
                                    line_y=self.y, line_h=first_h)
-            # Line 1: "Pi: 12.3K blk"
             draw.text((tx, self.y),
                       f"Pi: {_fmt_count(blk)} blk / {_fmt_count(tot)}",
                       font=font, fill=255)
             # Line 2: bar + % + clients
             bar_y  = self.y + first_h
             bar_h  = max(3, self.height - first_h - 1)
-            suffix = f" {pct_text} {clients}cl"
-            suf_w  = _measure_text(font, suffix) + 1
+            suffix = f"{pct_text} {clients}cl" if clients else pct_text
+            suf_w  = _measure_text(font, suffix) + 2
             bar_w  = self.width - suf_w - 1
             draw.rectangle([self.x, bar_y, self.x + bar_w, bar_y + bar_h], outline=255)
             fill_w = int((bar_w - 2) * pct / 100)
@@ -213,7 +294,7 @@ class PiholeSummaryWidget(Widget):
                     [self.x + 1, bar_y + 1, self.x + 1 + fill_w, bar_y + bar_h - 1],
                     fill=255,
                 )
-            draw.text((self.x + bar_w + 2, bar_y), suffix.strip(), font=font, fill=255)
+            draw.text((self.x + bar_w + 2, bar_y), suffix, font=font, fill=255)
         else:
             icon_size = min(self.height - 2, 14)
             tx = _draw_pihole_icon(draw, self, icon_size)
@@ -224,11 +305,11 @@ class PiholeSummaryWidget(Widget):
 
 class PiholeBlockRateWidget(Widget):
     """
-    Pi-hole block rate as a fill bar, like the RAM/Disk bar widgets.
+    Pi-hole block rate as a fill bar.
 
-    Tall (≥ 18 px):  line 1 = "Blocked: <N>"
+    Tall (≥ 18 px):  line 1 = [icon] "Blocked: <N>"
                      line 2 = [bar] <pct>%
-    Short:           "Blk: <N> (<pct>%)"
+    Short:           [icon] "Blk: <N> (<pct>%)"
     """
 
     WIDGET_ID        = "pihole_block_rate"
@@ -240,7 +321,7 @@ class PiholeBlockRateWidget(Widget):
     REFRESH_INTERVAL = 10.0
 
     def fetch_data(self) -> Dict[str, Any]:
-        return _fetch_pihole_data(self.config.get("api_key", ""))
+        return _widget_data(self)
 
     def render(self, draw: ImageDraw.ImageDraw, data: Any) -> None:
         font     = self.get_font()
@@ -270,25 +351,23 @@ class PiholeBlockRateWidget(Widget):
             icon_size = min(self.height - 2, 14)
             tx = _draw_pihole_icon(draw, self, icon_size)
             draw.text((tx, self.y),
-                      f"Blk: {_fmt_count(blk)} ({pct_text})",
+                      f"Blk:{_fmt_count(blk)} ({pct_text})",
                       font=font, fill=255)
 
 
 class PiholeQueriesWidget(Widget):
-    """
-    Pi-hole query counter: total and blocked on one compact line.
-    """
+    """Pi-hole query counter: total and blocked on one compact line."""
 
     WIDGET_ID        = "pihole_queries"
     WIDGET_NAME      = "Pi-hole Queries"
     WIDGET_CATEGORY  = "pihole"
     DEFAULT_SIZE     = (128, 12)
     MIN_SIZE         = (64, 10)
-    DESCRIPTION      = "Pi-hole total DNS queries today"
+    DESCRIPTION      = "Pi-hole total DNS queries and blocked count"
     REFRESH_INTERVAL = 10.0
 
     def fetch_data(self) -> Dict[str, Any]:
-        return _fetch_pihole_data(self.config.get("api_key", ""))
+        return _widget_data(self)
 
     def render(self, draw: ImageDraw.ImageDraw, data: Any) -> None:
         font      = self.get_font()
@@ -300,9 +379,7 @@ class PiholeQueriesWidget(Widget):
 
 
 class PiholeClientsWidget(Widget):
-    """
-    Pi-hole client counter: unique clients seen today.
-    """
+    """Pi-hole client counter: unique clients seen today."""
 
     WIDGET_ID        = "pihole_clients"
     WIDGET_NAME      = "Pi-hole Clients"
@@ -313,7 +390,7 @@ class PiholeClientsWidget(Widget):
     REFRESH_INTERVAL = 30.0
 
     def fetch_data(self) -> Dict[str, Any]:
-        return _fetch_pihole_data(self.config.get("api_key", ""))
+        return _widget_data(self)
 
     def render(self, draw: ImageDraw.ImageDraw, data: Any) -> None:
         font      = self.get_font()
@@ -322,7 +399,7 @@ class PiholeClientsWidget(Widget):
         draw.text((tx, self.y), f"Clients: {data['clients']}", font=font, fill=255)
 
 
-# ── All Pi-hole widget classes for external import ─────────────────────────
+# ── Export ───────────────────────────────────────────────────────────────────
 
 PIHOLE_WIDGETS = [
     PiholeSummaryWidget,

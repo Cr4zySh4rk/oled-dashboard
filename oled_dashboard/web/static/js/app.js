@@ -446,11 +446,24 @@
             load_avg:     [{ key: 'format', label: 'Format', type: 'select', options: ['all', '1min'] }],
             box:          [{ key: 'filled', label: 'Filled', type: 'checkbox' }],
             progress_bar: [{ key: 'value', label: 'Value %', type: 'number', min: 0, max: 100 }],
-            // Pi-hole widgets (api_key is optional — required only if auth is enabled in Pi-hole v6)
-            pihole_summary:    [{ key: 'api_key', label: 'API Key (opt)', type: 'text', default: '' }],
-            pihole_block_rate: [{ key: 'api_key', label: 'API Key (opt)', type: 'text', default: '' }],
-            pihole_queries:    [{ key: 'api_key', label: 'API Key (opt)', type: 'text', default: '' }],
-            pihole_clients:    [{ key: 'api_key', label: 'API Key (opt)', type: 'text', default: '' }],
+            // Pi-hole widgets — password is the Pi-hole app password (Pi-hole v6 → Settings → Web Interface)
+            // base_url only needed if Pi-hole is on a different host (default: http://localhost)
+            pihole_summary:    [
+                { key: 'password', label: 'Password',      type: 'text', default: '' },
+                { key: 'base_url', label: 'URL (opt)',      type: 'text', default: 'http://localhost' },
+            ],
+            pihole_block_rate: [
+                { key: 'password', label: 'Password',      type: 'text', default: '' },
+                { key: 'base_url', label: 'URL (opt)',      type: 'text', default: 'http://localhost' },
+            ],
+            pihole_queries:    [
+                { key: 'password', label: 'Password',      type: 'text', default: '' },
+                { key: 'base_url', label: 'URL (opt)',      type: 'text', default: 'http://localhost' },
+            ],
+            pihole_clients:    [
+                { key: 'password', label: 'Password',      type: 'text', default: '' },
+                { key: 'base_url', label: 'URL (opt)',      type: 'text', default: 'http://localhost' },
+            ],
         };
 
         // Collect all fields for this widget type
