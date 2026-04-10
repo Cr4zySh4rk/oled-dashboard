@@ -31,6 +31,9 @@
                     <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
                 </svg>
             </button>
+            <button class="btn btn-sm btn-ghost" id="btnExportConfig" title="Backup config to JSON file">Backup</button>
+            <button class="btn btn-sm btn-ghost" id="btnImportConfig" title="Restore config from JSON file">Restore</button>
+            <input type="file" id="fileImportConfig" style="display:none" accept=".json">
             <button class="btn btn-sm btn-primary" id="btnSaveLayout">Save Layout</button>
         </div>
     </header>
@@ -78,6 +81,19 @@
                 </div>
                 <div class="toolbar-group">
                     <button class="btn btn-sm btn-ghost btn-danger" id="btnClearAll" title="Clear All Widgets">Clear All</button>
+                </div>
+            </div>
+
+            <!-- Page tabs -->
+            <div class="page-tabs-bar" id="pageTabsBar">
+                <div class="page-tabs" id="pageTabs">
+                    <!-- Populated by JS -->
+                </div>
+                <div class="page-tabs-controls">
+                    <button class="btn btn-sm btn-ghost" id="btnAddPage" title="Add page (max 3)">+ Page</button>
+                    <span class="page-interval-label">Switch every</span>
+                    <input type="number" id="inputPageInterval" class="page-interval-input" value="5" min="0" max="300" step="1" title="Seconds between page transitions (0 = manual only)">
+                    <span class="page-interval-label">s</span>
                 </div>
             </div>
 

@@ -11,6 +11,44 @@ from typing import Any, Dict, List, Optional
 DEFAULT_CONFIG_DIR = os.path.expanduser("~/.config/oled-dashboard")
 DEFAULT_CONFIG_FILE = "config.json"
 
+_DEFAULT_WIDGETS = [
+    {
+        "widget_id": "ip_address",
+        "x": 0, "y": 0,
+        "width": 128, "height": 14,
+        "font_size": 12,
+        "config": {"show_label": True},
+    },
+    {
+        "widget_id": "cpu_usage",
+        "x": 0, "y": 16,
+        "width": 60, "height": 14,
+        "font_size": 11,
+        "config": {"show_bar": False},
+    },
+    {
+        "widget_id": "temperature",
+        "x": 68, "y": 16,
+        "width": 60, "height": 14,
+        "font_size": 11,
+        "config": {"unit": "C"},
+    },
+    {
+        "widget_id": "ram_usage",
+        "x": 0, "y": 32,
+        "width": 128, "height": 14,
+        "font_size": 11,
+        "config": {"format": "compact"},
+    },
+    {
+        "widget_id": "disk_space",
+        "x": 0, "y": 48,
+        "width": 128, "height": 14,
+        "font_size": 11,
+        "config": {"mount_point": "/", "show_bar": False},
+    },
+]
+
 DEFAULT_CONFIG = {
     "display": {
         "chip": "SSD1306",
@@ -27,45 +65,15 @@ DEFAULT_CONFIG = {
         "brightness": 255,
         "reset_pin": None,
     },
+    # Multi-page layout: up to 3 pages, each with a name and widget list.
+    "pages": [
+        {"name": "Page 1", "widgets": _DEFAULT_WIDGETS},
+    ],
+    "page_interval": 5.0,   # seconds between page transitions (0 = no auto-switch)
+    # Legacy single-layout key (kept for backward compatibility)
     "layout": {
         "name": "Default",
-        "widgets": [
-            {
-                "widget_id": "ip_address",
-                "x": 0, "y": 0,
-                "width": 128, "height": 14,
-                "font_size": 12,
-                "config": {"show_label": True},
-            },
-            {
-                "widget_id": "cpu_usage",
-                "x": 0, "y": 16,
-                "width": 60, "height": 14,
-                "font_size": 11,
-                "config": {"show_bar": False},
-            },
-            {
-                "widget_id": "temperature",
-                "x": 68, "y": 16,
-                "width": 60, "height": 14,
-                "font_size": 11,
-                "config": {"unit": "C"},
-            },
-            {
-                "widget_id": "ram_usage",
-                "x": 0, "y": 32,
-                "width": 128, "height": 14,
-                "font_size": 11,
-                "config": {"format": "compact"},
-            },
-            {
-                "widget_id": "disk_space",
-                "x": 0, "y": 48,
-                "width": 128, "height": 14,
-                "font_size": 11,
-                "config": {"mount_point": "/", "show_bar": False},
-            },
-        ],
+        "widgets": _DEFAULT_WIDGETS,
     },
     "server": {
         "host": "0.0.0.0",
@@ -153,6 +161,49 @@ class ConfigManager:
     def set_layout(self, layout: Dict[str, Any]) -> None:
         config = self.load()
         config["layout"] = layout
+        self.save()
+
+    # ── Multi-page API ────────────────────────────────────────────────────────
+
+    def get_pages(self) -> List[Dict[str, Any]]:
+        """Return the list of pages. Migrates from old single-layout format if needed."""
+        config = self.load()
+        pages = config.get("pages")
+        if pages and isinstance(pages, list) and len(pages) > 0:
+            return pages
+        # Migrate: build pages from the legacy 'layout' key
+        layout = config.get("layout", {})
+        return [{"name": "Page 1", "widgets": layout.get("widgets", [])}]
+
+    def set_pages(self, pages: List[Dict[str, Any]]) -> None:
+        """Save up to 3 pages. Also updates legacy 'layout' key for backward compat."""
+        pages = pages[:3]  # enforce max 3 pages
+        config = self.load()
+        config["pages"] = pages
+        # Keep legacy layout in sync with page 1
+        if pages:
+            config["layout"] = {
+                "name": pages[0].get("name", "Page 1"),
+                "widgets": pages[0].get("widgets", []),
+            }
+        self.save()
+
+    def get_page_interval(self) -> float:
+        """Return seconds between automatic page transitions (0 = no auto-switch)."""
+        return float(self.load().get("page_interval", 5.0))
+
+    def set_page_interval(self, interval: float) -> None:
+        config = self.load()
+        config["page_interval"] = max(0.0, float(interval))
+        self.save()
+
+    def import_config(self, data: Dict[str, Any]) -> None:
+        """Replace the entire config with imported data. Validates minimally."""
+        if not isinstance(data, dict):
+            raise ValueError("Config must be a JSON object")
+        if "display" not in data:
+            raise ValueError("Config missing 'display' key")
+        self._config = data
         self.save()
 
     def save_layout_preset(self, name: str, layout: Dict[str, Any]) -> None:

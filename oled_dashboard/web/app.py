@@ -5,7 +5,7 @@ Serves the Betaflight-style layout editor and API endpoints.
 
 import os
 import json
-from flask import Flask, render_template, request, jsonify, send_from_directory
+from flask import Flask, render_template, request, jsonify, send_from_directory, Response
 
 from oled_dashboard.config_manager import ConfigManager
 from oled_dashboard.renderer import DisplayRenderer
@@ -88,17 +88,30 @@ def create_app(config_manager: ConfigManager = None, renderer: DisplayRenderer =
 
     @app.route("/api/layout", methods=["GET"])
     def api_get_layout():
-        """Get the current layout."""
-        return jsonify(config_manager.get_layout())
+        """Get the current pages and page interval."""
+        return jsonify({
+            "pages": config_manager.get_pages(),
+            "page_interval": config_manager.get_page_interval(),
+            # Legacy field for backward compat
+            "layout": config_manager.get_layout(),
+        })
 
     @app.route("/api/layout", methods=["POST"])
     def api_set_layout():
-        """Update the current layout."""
+        """Update pages (and optionally page_interval). Accepts multi-page or legacy format."""
         data = request.get_json()
         if not data:
             return jsonify({"error": "No data provided"}), 400
 
-        config_manager.set_layout(data)
+        if "pages" in data:
+            config_manager.set_pages(data["pages"])
+        elif "widgets" in data:
+            # Legacy single-layout format
+            config_manager.set_pages([{"name": "Page 1", "widgets": data["widgets"]}])
+
+        if "page_interval" in data:
+            config_manager.set_page_interval(data["page_interval"])
+
         renderer.reload_layout()
         return jsonify({"status": "ok"})
 
@@ -181,8 +194,12 @@ def create_app(config_manager: ConfigManager = None, renderer: DisplayRenderer =
 
     @app.route("/api/config", methods=["GET"])
     def api_get_config():
-        """Get the full configuration."""
-        return jsonify(config_manager.load())
+        """Get the full configuration (includes pages + page_interval)."""
+        cfg = config_manager.load()
+        # Inject pages/page_interval so the JS can use them directly
+        cfg["pages"] = config_manager.get_pages()
+        cfg["page_interval"] = config_manager.get_page_interval()
+        return jsonify(cfg)
 
     @app.route("/api/config/reset", methods=["POST"])
     def api_reset_config():
@@ -190,6 +207,44 @@ def create_app(config_manager: ConfigManager = None, renderer: DisplayRenderer =
         config_manager.reset_to_defaults()
         renderer.reload_layout()
         return jsonify({"status": "ok"})
+
+    @app.route("/api/config/export", methods=["GET"])
+    def api_export_config():
+        """Download the full config as a JSON backup file."""
+        cfg = config_manager.load()
+        cfg["pages"] = config_manager.get_pages()
+        cfg["page_interval"] = config_manager.get_page_interval()
+        payload = json.dumps(cfg, indent=2)
+        return Response(
+            payload,
+            mimetype="application/json",
+            headers={"Content-Disposition": 'attachment; filename="oled-dashboard-config.json"'},
+        )
+
+    @app.route("/api/config/import", methods=["POST"])
+    def api_import_config():
+        """Apply a previously exported config (restore from backup)."""
+        # Accept either a multipart file upload or a raw JSON body
+        if request.files and "file" in request.files:
+            try:
+                data = json.loads(request.files["file"].read())
+            except Exception:
+                return jsonify({"error": "Could not parse uploaded file as JSON"}), 400
+        else:
+            data = request.get_json()
+
+        if not data:
+            return jsonify({"error": "No config data provided"}), 400
+
+        try:
+            config_manager.import_config(data)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+
+        renderer.stop()
+        renderer.initialize()
+        renderer.start()
+        return jsonify({"status": "ok", "message": "Config restored successfully"})
 
     @app.route("/api/status", methods=["GET"])
     def api_status():

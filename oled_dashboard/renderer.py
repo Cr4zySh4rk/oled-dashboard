@@ -23,13 +23,24 @@ class DisplayRenderer:
         self.config_manager = config_manager
         self.simulate = simulate
         self.driver: Optional[OLEDDriver] = None
-        self.widgets: List[Widget] = []
+        # Multi-page state
+        self._pages_widgets: List[List[Widget]] = [[]]
+        self._current_page: int = 0
+        self._last_page_switch: float = 0.0
+        self._page_interval: float = 5.0
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._simulated_driver: Optional[SimulatedDriver] = None
         # Track whether hardware init actually succeeded
         self._hardware_ok = False
+
+    @property
+    def widgets(self) -> List[Widget]:
+        """Widgets on the currently displayed page."""
+        if self._pages_widgets and self._current_page < len(self._pages_widgets):
+            return self._pages_widgets[self._current_page]
+        return []
 
     def initialize(self) -> bool:
         """Initialize the display driver and load widgets."""
@@ -83,27 +94,45 @@ class DisplayRenderer:
                 self.driver = self._simulated_driver
                 self._hardware_ok = False
 
-        self._load_widgets()
+        self._page_interval = self.config_manager.get_page_interval()
+        self._load_pages()
         return True
 
-    def _load_widgets(self) -> None:
-        """Load widgets from the current layout config."""
-        layout = self.config_manager.get_layout()
-        widget_configs = layout.get("widgets", [])
+    def _load_pages(self) -> None:
+        """Load all pages' widgets from config."""
+        pages_cfg = self.config_manager.get_pages()
+        new_pages: List[List[Widget]] = []
+        for page_cfg in pages_cfg:
+            page_widgets: List[Widget] = []
+            for wc in page_cfg.get("widgets", []):
+                widget = WidgetRegistry.create_from_dict(wc)
+                if widget is not None:
+                    page_widgets.append(widget)
+                else:
+                    print(f"[Renderer] Unknown widget: {wc.get('widget_id')}")
+            new_pages.append(page_widgets)
+        self._pages_widgets = new_pages if new_pages else [[]]
+        self._current_page = 0
+        self._last_page_switch = time.time()
 
-        self.widgets = []
-        for wc in widget_configs:
-            widget = WidgetRegistry.create_from_dict(wc)
-            if widget is not None:
-                self.widgets.append(widget)
-            else:
-                print(f"[Renderer] Unknown widget: {wc.get('widget_id')}")
+    # Keep _load_widgets as an alias for backward compat with any external callers
+    def _load_widgets(self) -> None:
+        self._load_pages()
 
     def reload_layout(self) -> None:
-        """Reload the layout from config (hot reload)."""
+        """Reload all pages from config (hot reload)."""
         with self._lock:
             self.config_manager._config = None
-            self._load_widgets()
+            self._page_interval = self.config_manager.get_page_interval()
+            self._load_pages()
+
+    def _maybe_advance_page(self) -> None:
+        """Advance to the next page if the page interval has elapsed."""
+        if len(self._pages_widgets) <= 1 or self._page_interval <= 0:
+            return
+        if time.time() - self._last_page_switch >= self._page_interval:
+            self._current_page = (self._current_page + 1) % len(self._pages_widgets)
+            self._last_page_switch = time.time()
 
     def render_frame(self) -> Image.Image:
         """Render a single frame and return the image."""
@@ -164,6 +193,7 @@ class DisplayRenderer:
         refresh_rate = self.config_manager.get("refresh_rate", 1.0)
         while self._running:
             try:
+                self._maybe_advance_page()
                 self.render_and_display()
             except Exception as e:
                 print(f"[Renderer] Frame error: {e}")

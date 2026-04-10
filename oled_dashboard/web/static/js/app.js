@@ -1,6 +1,11 @@
 /**
  * OLED Dashboard - Betaflight-style Layout Editor
  * Main application JavaScript
+ *
+ * Features:
+ *  - Multi-page layout (up to 3 pages) with configurable auto-transition
+ *  - Per-widget icon enable/disable
+ *  - Config backup (export) and restore (import)
  */
 
 (function () {
@@ -9,7 +14,9 @@
     // ── State ──────────────────────────────────────────────────
     const state = {
         display: { chip: 'SSD1306', width: 128, height: 64, rotation: 0, interface: 'i2c', brightness: 255 },
-        widgets: [],          // placed widget instances
+        pages: [[]],          // array of widget arrays (max 3)
+        currentPage: 0,        // index of the page being edited
+        pageInterval: 5,       // seconds between page transitions on the display
         availableWidgets: [], // widget catalog
         selectedWidgetIdx: -1,
         scale: 4,             // canvas pixel scale
@@ -17,6 +24,14 @@
         previewInterval: null,
         dragState: null,
     };
+
+    // Shorthand: widgets on the active page
+    function currentWidgets() {
+        if (!state.pages[state.currentPage]) {
+            state.pages[state.currentPage] = [];
+        }
+        return state.pages[state.currentPage];
+    }
 
     // Widget icon map
     const WIDGET_ICONS = {
@@ -26,6 +41,13 @@
         static_text: 'Aa', hline: '─', vline: '│', box: '□',
         progress_bar: '▓', datetime: '🕐',
     };
+
+    // Widgets that support the show_icon config option
+    const ICON_CAPABLE_WIDGETS = new Set([
+        'cpu_usage', 'ram_usage', 'swap_usage', 'temperature', 'uptime',
+        'load_avg', 'hostname', 'ip_address', 'net_speed', 'net_usage',
+        'disk_space', 'disk_io',
+    ]);
 
     // ── API helpers ────────────────────────────────────────────
     async function api(method, path, body = null) {
@@ -62,12 +84,21 @@
                 state.display = { ...state.display, ...config.display };
                 syncDisplayUI();
             }
-            if (config.layout && config.layout.widgets) {
-                state.widgets = config.layout.widgets;
+
+            // Load pages (new format) or fall back to legacy layout
+            if (config.pages && config.pages.length > 0) {
+                state.pages = config.pages.map(p => p.widgets || []);
+            } else if (config.layout && config.layout.widgets) {
+                state.pages = [config.layout.widgets];
+            } else {
+                state.pages = [[]];
             }
+            state.pageInterval = config.page_interval != null ? config.page_interval : 5;
+            state.currentPage = 0;
 
             // Set up canvas
             updateCanvas();
+            renderPageTabs();
             renderPlacedWidgets();
 
             // Set up event listeners
@@ -95,7 +126,6 @@
             opt.textContent = `${d.chip} ${d.description}`;
             sel.appendChild(opt);
         });
-        // Set current value
         const val = `${state.display.chip}:${state.display.width}x${state.display.height}`;
         sel.value = val;
     }
@@ -177,7 +207,6 @@
         grid.style.height = `${h * s}px`;
         grid.style.backgroundSize = `${s}px ${s}px`;
 
-        // Clear canvas to black
         const ctx = canvas.getContext('2d');
         ctx.fillStyle = '#000';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -186,12 +215,78 @@
         document.getElementById('displayChip').textContent = state.display.chip;
     }
 
+    // ── Page Tabs ──────────────────────────────────────────────
+    function renderPageTabs() {
+        const container = document.getElementById('pageTabs');
+        container.innerHTML = '';
+
+        state.pages.forEach((_, idx) => {
+            const tab = document.createElement('button');
+            tab.className = 'page-tab' + (idx === state.currentPage ? ' active' : '');
+            tab.dataset.page = idx;
+
+            const label = document.createTextNode(`Page ${idx + 1}`);
+            tab.appendChild(label);
+
+            // Delete button (only visible when more than 1 page)
+            if (state.pages.length > 1) {
+                const del = document.createElement('span');
+                del.className = 'tab-delete';
+                del.textContent = '✕';
+                del.title = 'Remove this page';
+                del.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    deletePage(idx);
+                });
+                tab.appendChild(del);
+            }
+
+            tab.addEventListener('click', () => switchPage(idx));
+            container.appendChild(tab);
+        });
+
+        // Add Page button visibility
+        const btnAdd = document.getElementById('btnAddPage');
+        btnAdd.style.display = state.pages.length >= 3 ? 'none' : '';
+
+        // Sync page interval input
+        document.getElementById('inputPageInterval').value = state.pageInterval;
+    }
+
+    function switchPage(idx) {
+        state.currentPage = idx;
+        state.selectedWidgetIdx = -1;
+        showProperties(-1);
+        renderPageTabs();
+        renderPlacedWidgets();
+    }
+
+    function addPage() {
+        if (state.pages.length >= 3) {
+            toast('Maximum 3 pages allowed', 'error');
+            return;
+        }
+        state.pages.push([]);
+        switchPage(state.pages.length - 1);
+    }
+
+    function deletePage(idx) {
+        if (state.pages.length <= 1) {
+            toast('Cannot remove the last page', 'error');
+            return;
+        }
+        if (!confirm(`Remove Page ${idx + 1} and all its widgets?`)) return;
+        state.pages.splice(idx, 1);
+        const newPage = Math.min(state.currentPage, state.pages.length - 1);
+        switchPage(newPage);
+    }
+
     // ── Placed Widgets ─────────────────────────────────────────
     function renderPlacedWidgets() {
         const overlay = document.getElementById('widgetOverlay');
         overlay.innerHTML = '';
 
-        state.widgets.forEach((w, idx) => {
+        currentWidgets().forEach((w, idx) => {
             const el = document.createElement('div');
             el.className = 'placed-widget' + (idx === state.selectedWidgetIdx ? ' selected' : '');
             el.dataset.index = idx;
@@ -202,19 +297,16 @@
             el.style.width = `${w.width * s}px`;
             el.style.height = `${w.height * s}px`;
 
-            // Semi-transparent colored background per category
             const meta = state.availableWidgets.find(a => a.widget_id === w.widget_id);
             const cat = meta ? meta.category : 'general';
             const colors = { system: '88,166,255', network: '63,185,80', storage: '210,153,34', general: '188,140,255' };
             el.style.background = `rgba(${colors[cat] || '136,136,136'}, 0.15)`;
 
-            // Label
             const label = document.createElement('span');
             label.className = 'widget-label';
             label.textContent = `${WIDGET_ICONS[w.widget_id] || ''} ${w.widget_id} [${w.x},${w.y}]`;
             el.appendChild(label);
 
-            // Resize handle
             const handle = document.createElement('div');
             handle.className = 'resize-handle';
             el.appendChild(handle);
@@ -222,13 +314,12 @@
             overlay.appendChild(el);
         });
 
-        // Render pixel preview on canvas
         renderCanvasPreview();
     }
 
     async function renderCanvasPreview() {
         try {
-            const data = await api('POST', '/api/preview/layout', { widgets: state.widgets });
+            const data = await api('POST', '/api/preview/layout', { widgets: currentWidgets() });
             if (data.image) {
                 const img = new Image();
                 img.onload = () => {
@@ -249,13 +340,13 @@
         state.selectedWidgetIdx = idx;
         const panel = document.getElementById('propertiesContent');
 
-        if (idx < 0 || idx >= state.widgets.length) {
+        if (idx < 0 || idx >= currentWidgets().length) {
             panel.innerHTML = '<p class="placeholder-text">Select a widget on the canvas to edit its properties.</p>';
             renderPlacedWidgets();
             return;
         }
 
-        const w = state.widgets[idx];
+        const w = currentWidgets()[idx];
         const meta = state.availableWidgets.find(a => a.widget_id === w.widget_id);
 
         panel.innerHTML = `
@@ -301,20 +392,17 @@
             </button>
         `;
 
-        // Bind property change listeners
         ['propX', 'propY', 'propW', 'propH', 'propFontSize'].forEach(id => {
             const el = document.getElementById(id);
             if (el) el.addEventListener('change', () => updateWidgetProperty(idx));
         });
 
-        // Config fields
         panel.querySelectorAll('[data-config-key]').forEach(el => {
             el.addEventListener('change', () => updateWidgetConfig(idx));
         });
 
-        // Delete button
         document.getElementById('btnDeleteWidget').addEventListener('click', () => {
-            state.widgets.splice(idx, 1);
+            currentWidgets().splice(idx, 1);
             state.selectedWidgetIdx = -1;
             showProperties(-1);
             renderPlacedWidgets();
@@ -324,29 +412,39 @@
     }
 
     function buildConfigFields(w) {
-        const configs = {
-            cpu_usage: [{ key: 'show_bar', label: 'Show Bar', type: 'checkbox' }],
-            ram_usage: [{ key: 'format', label: 'Format', type: 'select', options: ['compact', 'bar'] }],
-            temperature: [{ key: 'unit', label: 'Unit', type: 'select', options: ['C', 'F'] }],
-            disk_space: [
-                { key: 'mount_point', label: 'Mount', type: 'text', default: '/' },
-                { key: 'show_bar', label: 'Show Bar', type: 'checkbox' },
+        // Widget-specific config fields
+        const widgetConfigs = {
+            cpu_usage:    [{ key: 'show_bar',    label: 'Show Bar',    type: 'checkbox' }],
+            ram_usage:    [{ key: 'format',      label: 'Format',      type: 'select', options: ['compact', 'bar'] }],
+            temperature:  [{ key: 'unit',        label: 'Unit',        type: 'select', options: ['C', 'F'] }],
+            disk_space:   [
+                { key: 'mount_point', label: 'Mount',    type: 'text', default: '/' },
+                { key: 'show_bar',    label: 'Show Bar', type: 'checkbox' },
             ],
-            static_text: [{ key: 'text', label: 'Text', type: 'text', default: 'Hello' }],
-            datetime: [{ key: 'format', label: 'Format', type: 'select', options: ['time', 'date', 'datetime', 'short_time'] }],
-            ip_address: [{ key: 'show_label', label: 'Show Label', type: 'checkbox' }],
-            net_speed: [{ key: 'interface', label: 'Interface', type: 'text', default: '' }],
-            load_avg: [{ key: 'format', label: 'Format', type: 'select', options: ['all', '1min'] }],
-            box: [{ key: 'filled', label: 'Filled', type: 'checkbox' }],
+            static_text:  [{ key: 'text',    label: 'Text',   type: 'text',   default: 'Hello' }],
+            datetime:     [{ key: 'format',  label: 'Format', type: 'select', options: ['time', 'date', 'datetime', 'short_time'] }],
+            ip_address:   [{ key: 'show_label', label: 'Show Label', type: 'checkbox' }],
+            net_speed:    [{ key: 'interface', label: 'Interface', type: 'text', default: '' }],
+            load_avg:     [{ key: 'format', label: 'Format', type: 'select', options: ['all', '1min'] }],
+            box:          [{ key: 'filled', label: 'Filled', type: 'checkbox' }],
             progress_bar: [{ key: 'value', label: 'Value %', type: 'number', min: 0, max: 100 }],
         };
 
-        const fields = configs[w.widget_id];
-        if (!fields) return '';
+        // Collect all fields for this widget type
+        const fields = (widgetConfigs[w.widget_id] || []).slice();
+
+        // Append show_icon for icon-capable widgets
+        if (ICON_CAPABLE_WIDGETS.has(w.widget_id)) {
+            fields.push({ key: 'show_icon', label: 'Show Icon', type: 'checkbox', default: true });
+        }
+
+        if (fields.length === 0) return '';
 
         let html = '<div class="prop-group"><div class="prop-group-title">Configuration</div>';
         fields.forEach(f => {
-            const val = (w.config && w.config[f.key] !== undefined) ? w.config[f.key] : (f.default || '');
+            const rawVal = (w.config && w.config[f.key] !== undefined) ? w.config[f.key] : f.default;
+            // Normalise default: undefined → '' for text/number, true for checkbox
+            const val = rawVal !== undefined ? rawVal : (f.type === 'checkbox' ? true : '');
             if (f.type === 'checkbox') {
                 html += `<div class="prop-row">
                     <label>${f.label}</label>
@@ -375,14 +473,13 @@
     }
 
     function updateWidgetProperty(idx) {
-        const w = state.widgets[idx];
+        const w = currentWidgets()[idx];
         w.x = parseInt(document.getElementById('propX').value) || 0;
         w.y = parseInt(document.getElementById('propY').value) || 0;
         w.width = parseInt(document.getElementById('propW').value) || 32;
         w.height = parseInt(document.getElementById('propH').value) || 12;
         w.font_size = parseInt(document.getElementById('propFontSize').value) || 12;
 
-        // Snap to grid
         w.x = Math.round(w.x / state.gridSnap) * state.gridSnap;
         w.y = Math.round(w.y / state.gridSnap) * state.gridSnap;
 
@@ -390,7 +487,7 @@
     }
 
     function updateWidgetConfig(idx) {
-        const w = state.widgets[idx];
+        const w = currentWidgets()[idx];
         if (!w.config) w.config = {};
 
         document.querySelectorAll('[data-config-key]').forEach(el => {
@@ -437,19 +534,19 @@
         // Keyboard
         document.addEventListener('keydown', onKeyDown);
 
-        // Display settings changes
+        // Display settings
         document.getElementById('selDisplay').addEventListener('change', onDisplayChange);
         document.getElementById('selRotation').addEventListener('change', onRotationChange);
         document.getElementById('selInterface').addEventListener('change', onInterfaceChange);
         document.getElementById('sliderBrightness').addEventListener('input', onBrightnessChange);
 
-        // Save button
+        // Save
         document.getElementById('btnSaveLayout').addEventListener('click', saveLayout);
 
         // Clear all
         document.getElementById('btnClearAll').addEventListener('click', () => {
-            if (confirm('Remove all widgets from the canvas?')) {
-                state.widgets = [];
+            if (confirm('Remove all widgets from this page?')) {
+                state.pages[state.currentPage] = [];
                 state.selectedWidgetIdx = -1;
                 showProperties(-1);
                 renderPlacedWidgets();
@@ -461,6 +558,19 @@
 
         // Widget search
         document.getElementById('widgetSearch').addEventListener('input', onWidgetSearch);
+
+        // Page tabs
+        document.getElementById('btnAddPage').addEventListener('click', addPage);
+        document.getElementById('inputPageInterval').addEventListener('change', (e) => {
+            state.pageInterval = parseFloat(e.target.value) || 0;
+        });
+
+        // Backup / Restore
+        document.getElementById('btnExportConfig').addEventListener('click', exportConfig);
+        document.getElementById('btnImportConfig').addEventListener('click', () => {
+            document.getElementById('fileImportConfig').click();
+        });
+        document.getElementById('fileImportConfig').addEventListener('change', importConfig);
 
         // Modal
         document.getElementById('btnModalClose').addEventListener('click', closeModal);
@@ -475,7 +585,6 @@
         e.dataTransfer.setData('text/plain', widgetId);
         e.dataTransfer.effectAllowed = 'copy';
 
-        // Custom drag image
         dragGhost = document.createElement('div');
         dragGhost.className = 'drag-ghost';
         dragGhost.textContent = `${WIDGET_ICONS[widgetId] || '▪'} ${widgetId}`;
@@ -504,11 +613,9 @@
         let x = Math.floor((e.clientX - rect.left) / state.scale);
         let y = Math.floor((e.clientY - rect.top) / state.scale);
 
-        // Snap
         x = Math.round(x / state.gridSnap) * state.gridSnap;
         y = Math.round(y / state.gridSnap) * state.gridSnap;
 
-        // Clamp
         x = Math.max(0, Math.min(state.display.width - meta.default_size[0], x));
         y = Math.max(0, Math.min(state.display.height - meta.default_size[1], y));
 
@@ -523,8 +630,8 @@
             config: {},
         };
 
-        state.widgets.push(newWidget);
-        const idx = state.widgets.length - 1;
+        currentWidgets().push(newWidget);
+        const idx = currentWidgets().length - 1;
         showProperties(idx);
         toast(`Added ${meta.name}`, 'success');
 
@@ -547,10 +654,10 @@
             index: idx,
             startMouseX: e.clientX,
             startMouseY: e.clientY,
-            startX: state.widgets[idx].x,
-            startY: state.widgets[idx].y,
-            startW: state.widgets[idx].width,
-            startH: state.widgets[idx].height,
+            startX: currentWidgets()[idx].x,
+            startY: currentWidgets()[idx].y,
+            startW: currentWidgets()[idx].width,
+            startH: currentWidgets()[idx].height,
             frameRect: rect,
         };
 
@@ -561,7 +668,7 @@
         if (!state.dragState) return;
 
         const d = state.dragState;
-        const w = state.widgets[d.index];
+        const w = currentWidgets()[d.index];
         const s = state.scale;
         const dx = (e.clientX - d.startMouseX) / s;
         const dy = (e.clientY - d.startMouseY) / s;
@@ -583,7 +690,6 @@
         }
 
         renderPlacedWidgets();
-        // Update properties panel in real-time
         const propX = document.getElementById('propX');
         if (propX) {
             propX.value = w.x;
@@ -601,27 +707,24 @@
     }
 
     function onKeyDown(e) {
-        // Delete/Backspace removes selected widget
         if ((e.key === 'Delete' || e.key === 'Backspace') && state.selectedWidgetIdx >= 0) {
-            // Don't delete if an input is focused
             if (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'SELECT') return;
-            state.widgets.splice(state.selectedWidgetIdx, 1);
+            currentWidgets().splice(state.selectedWidgetIdx, 1);
             state.selectedWidgetIdx = -1;
             showProperties(-1);
             renderPlacedWidgets();
             e.preventDefault();
         }
 
-        // Arrow keys to nudge
         if (state.selectedWidgetIdx >= 0 && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
             if (document.activeElement.tagName === 'INPUT') return;
-            const w = state.widgets[state.selectedWidgetIdx];
+            const w = currentWidgets()[state.selectedWidgetIdx];
             const step = e.shiftKey ? 1 : state.gridSnap;
             switch (e.key) {
-                case 'ArrowLeft': w.x = Math.max(0, w.x - step); break;
+                case 'ArrowLeft':  w.x = Math.max(0, w.x - step); break;
                 case 'ArrowRight': w.x = Math.min(state.display.width - w.width, w.x + step); break;
-                case 'ArrowUp': w.y = Math.max(0, w.y - step); break;
-                case 'ArrowDown': w.y = Math.min(state.display.height - w.height, w.y + step); break;
+                case 'ArrowUp':    w.y = Math.max(0, w.y - step); break;
+                case 'ArrowDown':  w.y = Math.min(state.display.height - w.height, w.y + step); break;
             }
             showProperties(state.selectedWidgetIdx);
             renderPlacedWidgets();
@@ -638,13 +741,15 @@
         state.display.width = w;
         state.display.height = h;
 
-        // Remove widgets that fall outside new bounds
-        state.widgets = state.widgets.filter(widget =>
-            widget.x < w && widget.y < h
-        );
-        state.widgets.forEach(widget => {
-            if (widget.x + widget.width > w) widget.width = w - widget.x;
-            if (widget.y + widget.height > h) widget.height = h - widget.y;
+        // Clip widgets on all pages to the new bounds
+        state.pages.forEach((pageWidgets, pi) => {
+            state.pages[pi] = pageWidgets.filter(widget =>
+                widget.x < w && widget.y < h
+            );
+            state.pages[pi].forEach(widget => {
+                if (widget.x + widget.width > w)  widget.width  = w - widget.x;
+                if (widget.y + widget.height > h) widget.height = h - widget.y;
+            });
         });
 
         updateCanvas();
@@ -677,25 +782,67 @@
     // ── Save / Load ────────────────────────────────────────────
     async function saveLayout() {
         try {
-            // Save display config
             await api('POST', '/api/display', state.display);
-
-            // Save layout
             await api('POST', '/api/layout', {
-                name: 'Current',
-                widgets: state.widgets,
+                pages: state.pages.map((widgets, i) => ({
+                    name: `Page ${i + 1}`,
+                    widgets,
+                })),
+                page_interval: state.pageInterval,
             });
-
             toast('Layout saved!', 'success');
         } catch (err) {
             toast('Failed to save layout', 'error');
         }
     }
 
+    // ── Backup & Restore ───────────────────────────────────────
+    async function exportConfig() {
+        try {
+            // Trigger browser download via a hidden link
+            const a = document.createElement('a');
+            a.href = '/api/config/export';
+            a.download = 'oled-dashboard-config.json';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            toast('Config backup downloaded', 'success');
+        } catch (err) {
+            toast('Export failed', 'error');
+        }
+    }
+
+    async function importConfig(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        // Reset input so the same file can be selected again
+        e.target.value = '';
+
+        try {
+            const text = await file.text();
+            const data = JSON.parse(text);
+
+            if (!confirm('Replace the entire current config with the imported file? This cannot be undone.')) return;
+
+            const result = await api('POST', '/api/config/import', data);
+            if (result.error) {
+                toast(`Import failed: ${result.error}`, 'error');
+                return;
+            }
+
+            toast('Config restored! Reloading…', 'success');
+            // Reload the page to reflect the restored config
+            setTimeout(() => location.reload(), 1200);
+        } catch (err) {
+            toast('Invalid JSON file', 'error');
+        }
+    }
+
     // ── Preview ────────────────────────────────────────────────
     async function refreshPreview() {
         try {
-            const data = await api('POST', '/api/preview/layout', { widgets: state.widgets });
+            const data = await api('POST', '/api/preview/layout', { widgets: currentWidgets() });
             if (data.image) {
                 document.getElementById('previewImage').src = 'data:image/png;base64,' + data.image;
             }
