@@ -123,35 +123,52 @@ class ProgressBarWidget(Widget):
 
 
 class DateTimeWidget(Widget):
-    """Displays the current date and/or time."""
+    """Displays the current date and/or time.
+
+    Supported formats:
+      time          → 13:45:30   (24h with seconds, default)
+      short_time    → 13:45      (24h, no seconds)
+      time_12h      → 1:45 PM    (12h, no seconds)
+      time_12h_full → 1:45:30 PM (12h with seconds)
+      date          → 2024-01-25
+      date_short    → 01/25
+      date_long     → Thu Jan 25
+      datetime      → 01/25 13:45
+      datetime_12h  → 01/25 1:45 PM
+    """
 
     WIDGET_ID = "datetime"
     WIDGET_NAME = "Date/Time"
     WIDGET_CATEGORY = "general"
     DEFAULT_SIZE = (80, 12)
     MIN_SIZE = (40, 10)
-    DESCRIPTION = "Current date and/or time"
+    DESCRIPTION = "Current date and/or time (12h/24h, with or without seconds)"
     REFRESH_INTERVAL = 1.0
 
     def fetch_data(self) -> Dict[str, Any]:
         from datetime import datetime
         now = datetime.now()
+        hour12 = now.strftime("%-I") if hasattr(now, 'strftime') else str(int(now.strftime("%I")))
+        # Remove leading zero from 12-hour format on Windows-friendly way
+        try:
+            hour12 = str(int(now.strftime("%I")))
+        except Exception:
+            hour12 = now.strftime("%I").lstrip("0") or "12"
+        ampm = now.strftime("%p")   # AM or PM
         return {
-            "time": now.strftime("%H:%M:%S"),
-            "date": now.strftime("%Y-%m-%d"),
-            "short_time": now.strftime("%H:%M"),
-            "short_date": now.strftime("%m/%d"),
+            "time":          now.strftime("%H:%M:%S"),
+            "short_time":    now.strftime("%H:%M"),
+            "time_12h":      f"{hour12}:{now.strftime('%M')} {ampm}",
+            "time_12h_full": f"{hour12}:{now.strftime('%M:%S')} {ampm}",
+            "date":          now.strftime("%Y-%m-%d"),
+            "date_short":    now.strftime("%m/%d"),
+            "date_long":     now.strftime("%a %b %d"),
+            "datetime":      f"{now.strftime('%m/%d')} {now.strftime('%H:%M')}",
+            "datetime_12h":  f"{now.strftime('%m/%d')} {hour12}:{now.strftime('%M')} {ampm}",
         }
 
     def render(self, draw: ImageDraw.ImageDraw, data: Any) -> None:
         font = self.get_font()
         fmt = self.config.get("format", "time")
-        if fmt == "date":
-            text = data["date"]
-        elif fmt == "datetime":
-            text = f"{data['short_date']} {data['short_time']}"
-        elif fmt == "short_time":
-            text = data["short_time"]
-        else:
-            text = data["time"]
+        text = data.get(fmt, data["time"])
         draw.text((self.x, self.y), text, font=font, fill=255)

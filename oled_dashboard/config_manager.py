@@ -70,6 +70,7 @@ DEFAULT_CONFIG = {
         {"name": "Page 1", "widgets": _DEFAULT_WIDGETS},
     ],
     "page_interval": 5.0,   # seconds between page transitions (0 = no auto-switch)
+    "page_transition": "none",  # transition animation: none|diffuse|swipe_right|swipe_left|swipe_up|swipe_down|scroll_left|scroll_right|scroll_up|scroll_down
     # Legacy single-layout key (kept for backward compatibility)
     "layout": {
         "name": "Default",
@@ -195,6 +196,19 @@ class ConfigManager:
     def set_page_interval(self, interval: float) -> None:
         config = self.load()
         config["page_interval"] = max(0.0, float(interval))
+        self.save()
+
+    def get_page_transition(self) -> str:
+        """Return the transition animation name."""
+        return self.load().get("page_transition", "none")
+
+    def set_page_transition(self, transition: str) -> None:
+        valid = {
+            "none", "diffuse", "swipe_right", "swipe_left", "swipe_up", "swipe_down",
+            "scroll_left", "scroll_right", "scroll_up", "scroll_down",
+        }
+        config = self.load()
+        config["page_transition"] = transition if transition in valid else "none"
         self.save()
 
     def import_config(self, data: Dict[str, Any]) -> None:

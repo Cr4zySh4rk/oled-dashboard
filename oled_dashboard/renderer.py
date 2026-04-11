@@ -1,6 +1,10 @@
 """
 Display renderer - reads the layout configuration and renders widgets
 to the OLED display in a loop.
+
+Supports page-transition animations:
+  none, diffuse, swipe_right, swipe_left, swipe_up, swipe_down,
+  scroll_left, scroll_right, scroll_up, scroll_down
 """
 
 import time
@@ -19,6 +23,10 @@ from oled_dashboard.widgets.registry import WidgetRegistry
 class DisplayRenderer:
     """Renders widgets onto the OLED display based on layout config."""
 
+    # Transition duration in seconds and steps
+    _TRANSITION_DURATION = 0.4
+    _TRANSITION_STEPS    = 8   # number of intermediate frames
+
     def __init__(self, config_manager: ConfigManager, simulate: bool = False):
         self.config_manager = config_manager
         self.simulate = simulate
@@ -28,6 +36,7 @@ class DisplayRenderer:
         self._current_page: int = 0
         self._last_page_switch: float = 0.0
         self._page_interval: float = 5.0
+        self._page_transition: str = "none"
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
@@ -94,7 +103,8 @@ class DisplayRenderer:
                 self.driver = self._simulated_driver
                 self._hardware_ok = False
 
-        self._page_interval = self.config_manager.get_page_interval()
+        self._page_interval  = self.config_manager.get_page_interval()
+        self._page_transition = self.config_manager.get_page_transition()
         self._load_pages()
         return True
 
@@ -123,7 +133,8 @@ class DisplayRenderer:
         """Reload all pages from config (hot reload)."""
         with self._lock:
             self.config_manager._config = None
-            self._page_interval = self.config_manager.get_page_interval()
+            self._page_interval  = self.config_manager.get_page_interval()
+            self._page_transition = self.config_manager.get_page_transition()
             self._load_pages()
 
     def _maybe_advance_page(self) -> None:
@@ -131,8 +142,108 @@ class DisplayRenderer:
         if len(self._pages_widgets) <= 1 or self._page_interval <= 0:
             return
         if time.time() - self._last_page_switch >= self._page_interval:
+            old_page = self._current_page
             self._current_page = (self._current_page + 1) % len(self._pages_widgets)
             self._last_page_switch = time.time()
+            # Play transition animation if configured
+            if self._page_transition != "none":
+                self._play_transition(old_page, self._current_page)
+
+    def _render_page_image(self, page_idx: int) -> Image.Image:
+        """Render a single page to an image without touching the display."""
+        w = self.driver.width if self.driver else 128
+        h = self.driver.height if self.driver else 64
+        image = Image.new("1", (w, h), 0)
+        draw = ImageDraw.Draw(image)
+        widgets = self._pages_widgets[page_idx] if page_idx < len(self._pages_widgets) else []
+        for widget in widgets:
+            try:
+                widget.draw(draw)
+            except Exception:
+                pass
+        return image
+
+    def _push_frame(self, image: Image.Image) -> None:
+        """Push an image to both the sim buffer and hardware."""
+        self._simulated_driver.display_image(image)
+        if self._hardware_ok and self.driver and not isinstance(self.driver, SimulatedDriver):
+            try:
+                self.driver.display_image(image)
+            except Exception:
+                pass
+
+    def _play_transition(self, from_page: int, to_page: int) -> None:
+        """Render a transition animation between two pages."""
+        w = self.driver.width if self.driver else 128
+        h = self.driver.height if self.driver else 64
+        steps = self._TRANSITION_STEPS
+        delay = self._TRANSITION_DURATION / steps
+
+        img_from = self._render_page_image(from_page)
+        img_to   = self._render_page_image(to_page)
+
+        t = self._page_transition
+
+        for step in range(1, steps + 1):
+            frac = step / steps          # 0 < frac ≤ 1
+            frame = Image.new("1", (w, h), 0)
+
+            if t == "diffuse":
+                # Pixel-level probabilistic blend: at each step, each pixel
+                # from 'to' image has a `frac` chance of showing through.
+                import random
+                px_from = list(img_from.getdata())
+                px_to   = list(img_to.getdata())
+                out = [
+                    px_to[i] if random.random() < frac else px_from[i]
+                    for i in range(w * h)
+                ]
+                frame.putdata(out)
+
+            elif t in ("swipe_right", "swipe_left", "swipe_up", "swipe_down",
+                       "scroll_left", "scroll_right", "scroll_up", "scroll_down"):
+                # All slide variants: compute offset for this step
+                # "swipe_*"  → incoming page slides over the outgoing (which is static)
+                # "scroll_*" → both pages scroll together (continuous belt feel)
+                if t in ("swipe_right", "scroll_right"):
+                    offset = int(w * (1 - frac))   # incoming from right → left
+                    if t == "swipe_right":
+                        frame.paste(img_from, (0, 0))
+                        frame.paste(img_to, (-(w - offset), 0))
+                    else:
+                        # Continuous scroll: old slides out left, new slides in right
+                        frame.paste(img_from, (-offset, 0))
+                        frame.paste(img_to,   (w - offset, 0))
+
+                elif t in ("swipe_left", "scroll_left"):
+                    offset = int(w * frac)
+                    if t == "swipe_left":
+                        frame.paste(img_from, (0, 0))
+                        frame.paste(img_to, (w - offset, 0))
+                    else:
+                        frame.paste(img_from, (-offset, 0))
+                        frame.paste(img_to,   (w - offset, 0))
+
+                elif t in ("swipe_up", "scroll_up"):
+                    offset = int(h * frac)
+                    if t == "swipe_up":
+                        frame.paste(img_from, (0, 0))
+                        frame.paste(img_to, (0, h - offset))
+                    else:
+                        frame.paste(img_from, (0, -offset))
+                        frame.paste(img_to,   (0, h - offset))
+
+                elif t in ("swipe_down", "scroll_down"):
+                    offset = int(h * (1 - frac))
+                    if t == "swipe_down":
+                        frame.paste(img_from, (0, 0))
+                        frame.paste(img_to, (0, -(h - offset)))
+                    else:
+                        frame.paste(img_from, (0, offset))
+                        frame.paste(img_to,   (0, -(h - offset)))
+
+            self._push_frame(frame)
+            time.sleep(delay)
 
     def render_frame(self) -> Image.Image:
         """Render a single frame and return the image."""

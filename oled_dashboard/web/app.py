@@ -112,6 +112,9 @@ def create_app(config_manager: ConfigManager = None, renderer: DisplayRenderer =
         if "page_interval" in data:
             config_manager.set_page_interval(data["page_interval"])
 
+        if "page_transition" in data:
+            config_manager.set_page_transition(data["page_transition"])
+
         renderer.reload_layout()
         return jsonify({"status": "ok"})
 
@@ -194,11 +197,12 @@ def create_app(config_manager: ConfigManager = None, renderer: DisplayRenderer =
 
     @app.route("/api/config", methods=["GET"])
     def api_get_config():
-        """Get the full configuration (includes pages + page_interval)."""
+        """Get the full configuration (includes pages + page_interval + page_transition)."""
         cfg = config_manager.load()
-        # Inject pages/page_interval so the JS can use them directly
+        # Inject pages/page_interval/page_transition so the JS can use them directly
         cfg["pages"] = config_manager.get_pages()
         cfg["page_interval"] = config_manager.get_page_interval()
+        cfg["page_transition"] = config_manager.get_page_transition()
         return jsonify(cfg)
 
     @app.route("/api/config/reset", methods=["POST"])

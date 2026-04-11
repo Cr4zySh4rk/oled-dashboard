@@ -17,6 +17,7 @@
         pages: [[]],          // array of widget arrays (max 3)
         currentPage: 0,        // index of the page being edited
         pageInterval: 5,       // seconds between page transitions on the display
+        pageTransition: 'none', // transition animation
         availableWidgets: [], // widget catalog
         selectedWidgetIdx: -1,
         scale: 4,             // canvas pixel scale
@@ -40,6 +41,8 @@
         net_speed: '📶', net_usage: '📡', disk_space: '💿', disk_io: '📀',
         static_text: 'Aa', hline: '─', vline: '│', box: '□',
         progress_bar: '▓', datetime: '🕐',
+        // Weather
+        weather: '⛅',
         // Pi-hole
         pihole_summary: '🛡', pihole_block_rate: '🛡', pihole_queries: '🛡', pihole_clients: '🛡',
     };
@@ -49,6 +52,7 @@
         'cpu_usage', 'ram_usage', 'swap_usage', 'temperature', 'uptime',
         'load_avg', 'hostname', 'ip_address', 'net_speed', 'net_usage',
         'disk_space', 'disk_io',
+        'weather',
         'pihole_summary', 'pihole_block_rate', 'pihole_queries', 'pihole_clients',
     ]);
 
@@ -107,7 +111,8 @@
             } else {
                 state.pages = [[]];
             }
-            state.pageInterval = config.page_interval != null ? config.page_interval : 5;
+            state.pageInterval   = config.page_interval  != null ? config.page_interval  : 5;
+            state.pageTransition = config.page_transition != null ? config.page_transition : 'none';
             state.currentPage = 0;
 
             // Set up canvas
@@ -163,7 +168,7 @@
         const order = ['system', 'network', 'storage', 'pihole', 'general'];
         const catNames = {
             system: 'System', network: 'Network', storage: 'Storage',
-            pihole: '🛡 Pi-hole', general: 'General',
+            pihole: '🛡 Pi-hole', general: '⛅ General',
         };
 
         order.forEach(cat => {
@@ -266,8 +271,10 @@
         const btnAdd = document.getElementById('btnAddPage');
         btnAdd.style.display = state.pages.length >= 3 ? 'none' : '';
 
-        // Sync page interval input
+        // Sync page interval and transition inputs
         document.getElementById('inputPageInterval').value = state.pageInterval;
+        const selTrans = document.getElementById('selPageTransition');
+        if (selTrans) selTrans.value = state.pageTransition;
     }
 
     function switchPage(idx) {
@@ -439,13 +446,25 @@
                 { key: 'units',       label: 'Units', type: 'select', options: ['MB', 'GB', 'TB'], default: 'GB' },
             ],
             static_text:  [{ key: 'text',    label: 'Text',   type: 'text',   default: 'Hello' }],
-            datetime:     [{ key: 'format',  label: 'Format', type: 'select', options: ['time', 'date', 'datetime', 'short_time'] }],
+            datetime:     [{ key: 'format',  label: 'Format', type: 'select', options: [
+                'time', 'short_time', 'time_12h', 'time_12h_full',
+                'date', 'date_short', 'date_long',
+                'datetime', 'datetime_12h',
+            ] }],
             ip_address:   [{ key: 'show_label', label: 'Show Label', type: 'checkbox' }],
             net_speed:    [{ key: 'interface', label: 'Interface', type: 'text', default: '' }],
             net_usage:    [{ key: 'interface', label: 'Interface', type: 'text', default: '' }],
             load_avg:     [{ key: 'format', label: 'Format', type: 'select', options: ['all', '1min'] }],
             box:          [{ key: 'filled', label: 'Filled', type: 'checkbox' }],
             progress_bar: [{ key: 'value', label: 'Value %', type: 'number', min: 0, max: 100 }],
+            // Weather widget
+            weather: [
+                { key: 'latitude',  label: 'Latitude',  type: 'number', default: 0.0 },
+                { key: 'longitude', label: 'Longitude', type: 'number', default: 0.0 },
+                { key: 'temp_unit', label: 'Temp Unit', type: 'select', options: ['C', 'F'] },
+                { key: 'wind_unit', label: 'Wind Unit', type: 'select', options: ['kmh', 'mph', 'ms', 'kn'] },
+                { key: 'format',    label: 'Format',    type: 'select', options: ['temp_cond', 'temp_only', 'full', 'compact'] },
+            ],
             // Pi-hole widgets — password is the Pi-hole app password (Pi-hole v6 → Settings → Web Interface)
             // base_url only needed if Pi-hole is on a different host (default: http://localhost)
             pihole_summary:    [
@@ -599,6 +618,10 @@
         document.getElementById('btnAddPage').addEventListener('click', addPage);
         document.getElementById('inputPageInterval').addEventListener('change', (e) => {
             state.pageInterval = parseFloat(e.target.value) || 0;
+        });
+        const selTrans = document.getElementById('selPageTransition');
+        if (selTrans) selTrans.addEventListener('change', (e) => {
+            state.pageTransition = e.target.value;
         });
 
         // Backup / Restore
@@ -824,7 +847,8 @@
                     name: `Page ${i + 1}`,
                     widgets,
                 })),
-                page_interval: state.pageInterval,
+                page_interval:  state.pageInterval,
+                page_transition: state.pageTransition,
             });
             toast('Layout saved!', 'success');
         } catch (err) {

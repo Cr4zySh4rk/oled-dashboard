@@ -70,17 +70,24 @@ class WidgetRegistry:
         for w in builtin:
             cls._widgets[w.WIDGET_ID] = w
 
-        # ── Conditionally register Pi-hole widgets ────────────────────
+        # ── Always register Pi-hole widgets ──────────────────────────
+        # Widgets are always registered so they appear in the palette.
+        # They handle connection errors gracefully at runtime (show 0s /
+        # "error" status when Pi-hole is unreachable).
         try:
-            from oled_dashboard.widgets.pihole_widgets import (
-                is_pihole_available,
-                PIHOLE_WIDGETS,
-            )
-            if is_pihole_available():
-                for w in PIHOLE_WIDGETS:
-                    cls._widgets[w.WIDGET_ID] = w
+            from oled_dashboard.widgets.pihole_widgets import PIHOLE_WIDGETS
+            for w in PIHOLE_WIDGETS:
+                cls._widgets[w.WIDGET_ID] = w
         except ImportError:
             pass  # pihole_widgets module not present — skip silently
+
+        # ── Always register weather widget ────────────────────────────
+        try:
+            from oled_dashboard.widgets.weather_widgets import WEATHER_WIDGETS
+            for w in WEATHER_WIDGETS:
+                cls._widgets[w.WIDGET_ID] = w
+        except ImportError:
+            pass
 
     @classmethod
     def get_widget_class(cls, widget_id: str) -> Optional[Type[Widget]]:

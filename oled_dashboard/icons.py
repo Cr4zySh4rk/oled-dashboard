@@ -31,46 +31,55 @@ def _ellipse(draw, x, y, w, h, outline=255, fill=None):
 # ── Icon Drawers ───────────────────────────────────────────────────────
 
 def _icon_cpu(draw: ImageDraw.ImageDraw, x: int, y: int, s: int):
-    """Microchip: square body with pins on all sides."""
-    m = max(1, s // 6)         # margin for pins
+    """SMD chip top-view: square body with short flat pins along all 4 edges."""
+    import math
+    m = max(2, s // 5)          # pin length (distance from body edge to chip edge)
     body = s - m * 2
-    # Body
-    draw.rectangle([x + m, y + m, x + m + body - 1, y + m + body - 1], outline=255)
-    # Corner dots (die area)
-    inner = body // 3
-    ox, oy = x + m + (body - inner) // 2, y + m + (body - inner) // 2
-    draw.rectangle([ox, oy, ox + inner - 1, oy + inner - 1], fill=255)
-    # Pins — top and bottom (2 each)
-    pin_gap = body // 3
-    for i in range(2):
-        px_ = x + m + pin_gap // 2 + i * pin_gap
-        _line(draw, px_, y, px_, y + m - 1)             # top
-        _line(draw, px_, y + m + body, px_, y + s - 1)  # bottom
-    # Pins — left and right
-    for i in range(2):
-        py_ = y + m + pin_gap // 2 + i * pin_gap
-        _line(draw, x, py_, x + m - 1, py_)             # left
-        _line(draw, x + m + body, py_, x + s - 1, py_)  # right
+    bx, by = x + m, y + m
+    # Outer body rectangle
+    draw.rectangle([bx, by, bx + body - 1, by + body - 1], outline=255)
+    # Filled interior square (die shadow)
+    inner = max(2, body - 4)
+    ix = bx + (body - inner) // 2
+    iy = by + (body - inner) // 2
+    draw.rectangle([ix, iy, ix + inner - 1, iy + inner - 1], fill=255)
+    # Erase a cross inside the die to show grid structure
+    cx, cy = bx + body // 2, by + body // 2
+    draw.line([ix, cy, ix + inner - 1, cy], fill=0)
+    draw.line([cx, iy, cx, iy + inner - 1], fill=0)
+    # Pins: 2 per side, short flat rectangles flush with body edge
+    n_pins = 2
+    pin_h = max(1, m - 1)       # pin protrudes pin_h pixels outward
+    pin_w = max(1, body // 4)   # pin width
+    gap   = (body - n_pins * pin_w) // (n_pins + 1)
+    for i in range(n_pins):
+        offset = gap + i * (pin_w + gap)
+        # Top pins
+        px = bx + offset
+        draw.rectangle([px, by - pin_h, px + pin_w - 1, by - 1], fill=255)
+        # Bottom pins
+        draw.rectangle([px, by + body, px + pin_w - 1, by + body + pin_h - 1], fill=255)
+        # Left pins
+        py = by + offset
+        draw.rectangle([bx - pin_h, py, bx - 1, py + pin_w - 1], fill=255)
+        # Right pins
+        draw.rectangle([bx + body, py, bx + body + pin_h - 1, py + pin_w - 1], fill=255)
 
 
 def _icon_ram(draw: ImageDraw.ImageDraw, x: int, y: int, s: int):
-    """RAM stick: rectangle with notch and chip bumps on top."""
-    bar_h = max(2, s * 3 // 8)
-    bar_y = y + s - bar_h
-    # Main bar
-    draw.rectangle([x, bar_y, x + s - 1, y + s - 1], outline=255)
-    # Notch (bottom center)
-    notch_w = max(2, s // 5)
-    notch_x = x + (s - notch_w) // 2
-    draw.rectangle([notch_x, y + s - max(2, s // 5), notch_x + notch_w - 1, y + s - 1], fill=0, outline=0)
-    # Chip bumps on top
-    n_chips = max(2, s // 4)
-    chip_w = max(1, (s - n_chips) // n_chips)
-    for i in range(n_chips):
-        cx = x + i * (chip_w + 1)
-        if cx + chip_w <= x + s:
-            chip_h = max(2, s // 4)
-            draw.rectangle([cx, bar_y - chip_h, cx + chip_w - 1, bar_y - 1], fill=255)
+    """RAM stick: slim horizontal rectangle (PCB) with 2 small filled chip squares."""
+    # PCB bar: thin horizontal rectangle, vertically centred
+    bar_h = max(3, s * 2 // 5)
+    bar_y = y + (s - bar_h) // 2
+    draw.rectangle([x, bar_y, x + s - 1, bar_y + bar_h - 1], outline=255)
+    # Two filled chip squares evenly spaced inside the bar
+    chip_s = max(2, bar_h - 2)
+    spacing = (s - 2 * chip_s) // 3
+    for i in range(2):
+        cx = x + spacing + i * (chip_s + spacing)
+        cy = bar_y + (bar_h - chip_s) // 2
+        if cx + chip_s - 1 < x + s:
+            draw.rectangle([cx, cy, cx + chip_s - 1, cy + chip_s - 1], fill=255)
 
 
 def _icon_temperature(draw: ImageDraw.ImageDraw, x: int, y: int, s: int):
@@ -271,16 +280,27 @@ def _icon_pihole_clients(draw: ImageDraw.ImageDraw, x: int, y: int, s: int):
 
 
 def _icon_disk(draw: ImageDraw.ImageDraw, x: int, y: int, s: int):
-    """Hard disk / CD: outer ring + inner hole + small sector."""
+    """Disk: circle with a shaded (filled) pie-sector representing used space."""
+    import math
     r = s // 2 - 1
     cx, cy = x + s // 2, y + s // 2
-    _ellipse(draw, cx - r, cy - r, r * 2, r * 2, outline=255)
-    # Inner hole
+    # Draw a filled sector (≈ 60 % of disk used) from 270° to 270°+216° (60% of 360)
+    # PIL pieslice draws a filled wedge
+    sector_pct = 0.60
+    start_angle = -90          # top of circle
+    end_angle   = start_angle + int(360 * sector_pct)
+    draw.pieslice(
+        [cx - r, cy - r, cx + r - 1, cy + r - 1],
+        start=start_angle, end=end_angle, fill=255
+    )
+    # Outer ring outline over the fill
+    draw.ellipse([cx - r, cy - r, cx + r - 1, cy + r - 1], outline=255)
+    # Small centre hole (erase)
     hole_r = max(1, r // 3)
-    _ellipse(draw, cx - hole_r, cy - hole_r, hole_r * 2, hole_r * 2, outline=255, fill=0)
-    # One filled sector (read head arm)
-    _line(draw, cx, cy, cx + r - 1, cy)
-    _line(draw, cx, cy, cx, cy - r + 1)
+    draw.ellipse(
+        [cx - hole_r, cy - hole_r, cx + hole_r - 1, cy + hole_r - 1],
+        fill=0, outline=255
+    )
 
 
 def _icon_disk_io(draw: ImageDraw.ImageDraw, x: int, y: int, s: int):
@@ -309,6 +329,29 @@ def _icon_lightning(draw: ImageDraw.ImageDraw, x: int, y: int, s: int):
         _line(draw, pts[i], pts[i + 1], pts[i + 2], pts[i + 3])
     # Fill interior for bolder look
     draw.polygon(pts, fill=255)
+
+
+def _icon_weather(draw: ImageDraw.ImageDraw, x: int, y: int, s: int):
+    """Weather icon: cloud outline with a sun peeking from top-right."""
+    # Sun (circle) at top-right
+    sun_r = max(2, s // 5)
+    sun_cx = x + s - sun_r - 1
+    sun_cy = y + sun_r + 1
+    _ellipse(draw, sun_cx - sun_r, sun_cy - sun_r, sun_r * 2, sun_r * 2, outline=255)
+    # Cloud body: an arc/ellipse on the lower-left
+    cloud_w = s * 7 // 10
+    cloud_h = max(3, s * 4 // 10)
+    cloud_x = x
+    cloud_y = y + s - cloud_h - 1
+    draw.arc([cloud_x, cloud_y, cloud_x + cloud_w - 1, cloud_y + cloud_h - 1],
+             start=180, end=360, fill=255)
+    # Cloud top bump
+    bump_r = max(2, cloud_h // 2)
+    bump_cx = cloud_x + cloud_w // 3
+    bump_cy = cloud_y + cloud_h // 2
+    _ellipse(draw, bump_cx - bump_r, bump_cy - bump_r, bump_r * 2, bump_r * 2, outline=255)
+    # Bottom flat line of cloud
+    _line(draw, cloud_x, cloud_y + cloud_h - 1, cloud_x + cloud_w - 1, cloud_y + cloud_h - 1)
 
 
 def _icon_text(draw: ImageDraw.ImageDraw, x: int, y: int, s: int):
@@ -390,7 +433,7 @@ def _icon_swap(draw: ImageDraw.ImageDraw, x: int, y: int, s: int):
 # ── Registry ───────────────────────────────────────────────────────────
 
 _ICON_MAP = {
-    "cpu_usage":         _icon_lightning,
+    "cpu_usage":         _icon_cpu,
     "ram_usage":         _icon_ram,
     "swap_usage":        _icon_swap,
     "temperature":       _icon_temperature,
@@ -408,13 +451,15 @@ _ICON_MAP = {
     "box":               _icon_box,
     "progress_bar":      _icon_progress,
     "datetime":          _icon_datetime,
+    # Weather widget
+    "weather":           _icon_weather,
     # Pi-hole widgets
     "pihole_summary":    _icon_pihole_summary,
     "pihole_block_rate": _icon_pihole_block_rate,
     "pihole_queries":    _icon_pihole_queries,
     "pihole_clients":    _icon_pihole_clients,
     # aliases
-    "cpu":               _icon_lightning,
+    "cpu":               _icon_cpu,
     "ram":               _icon_ram,
     "temp":              _icon_temperature,
     "network":           _icon_ethernet,
