@@ -133,6 +133,56 @@ def _measure_text(font, text: str) -> int:
             return len(text) * 6
 
 
+def _font_height(font) -> int:
+    """Return the pixel height of a single text line for this font."""
+    try:
+        # PIL ≥ 9.2
+        bbox = font.getbbox("Ag")
+        return bbox[3] - bbox[1]
+    except AttributeError:
+        try:
+            return font.getsize("Ag")[1]
+        except Exception:
+            return 8
+
+
+def _draw_text_wrapped(draw, text: str, font, x: int, y: int,
+                       max_w: int, max_h: int, line_gap: int = 1) -> None:
+    """
+    Draw *text* inside a box of (max_w × max_h) pixels starting at (x, y).
+
+    Words are split on spaces; if a single word is still too wide it is
+    truncated with '…'.  Lines that would exceed max_h are silently dropped.
+    """
+    lh = _font_height(font) + line_gap
+    words = text.split()
+    lines: list = []
+    current = ""
+
+    for word in words:
+        candidate = (current + " " + word).strip() if current else word
+        if _measure_text(font, candidate) <= max_w:
+            current = candidate
+        else:
+            if current:
+                lines.append(current)
+            # If the word alone is still too wide, hard-truncate it
+            if _measure_text(font, word) > max_w:
+                while word and _measure_text(font, word + "…") > max_w:
+                    word = word[:-1]
+                word = word + "…" if word else "…"
+            current = word
+    if current:
+        lines.append(current)
+
+    cy = y
+    for line in lines:
+        if cy + lh - line_gap > y + max_h:
+            break
+        draw.text((x, cy), line, font=font, fill=255)
+        cy += lh
+
+
 # ── Widget ──────────────────────────────────────────────────────────────────
 
 class WeatherWidget(Widget):
@@ -141,6 +191,17 @@ class WeatherWidget(Widget):
 
     Uses lat/lon from the widget config. If both are 0 and no location
     has been set, shows "Set lat/lon".
+
+    Rendering is fully adaptive:
+      • The icon is drawn in the top-left (if enabled and there's room).
+      • Remaining space is split into logical data rows depending on the
+        chosen format and the widget's height:
+          – Short  (1 line tall): as much as fits on one line, abbreviated.
+          – Medium (2 lines):     temp+condition on line 1, wind+humidity
+                                  on line 2 (for "full" format).
+          – Tall   (3+ lines):    one data item per line.
+      • Text that is too wide for the column wraps word-by-word; single
+        words that are still too wide are hard-truncated with '…'.
     """
 
     WIDGET_ID        = "weather"
@@ -152,51 +213,117 @@ class WeatherWidget(Widget):
     REFRESH_INTERVAL = 600.0   # 10 minutes — Open-Meteo updates every 15 min
 
     def fetch_data(self) -> Dict[str, Any]:
-        lat  = float(self.config.get("latitude",  0.0))
-        lon  = float(self.config.get("longitude", 0.0))
-        tunit = self.config.get("temp_unit",  "C").upper()
-        wunit = self.config.get("wind_unit",  "kmh").lower()
+        lat   = float(self.config.get("latitude",  0.0))
+        lon   = float(self.config.get("longitude", 0.0))
+        tunit = self.config.get("temp_unit", "C").upper()
+        wunit = self.config.get("wind_unit", "kmh").lower()
         if lat == 0.0 and lon == 0.0:
             return {
                 "temp": "--", "wind_speed": "--", "humidity": "--",
-                "condition": "Set lat/lon", "cond_short": "---",
+                "condition": "Set lat/lon", "cond_short": "N/A",
                 "temp_unit": "°C", "wind_unit": wunit, "status": "unconfigured",
             }
         return _get_weather_data(lat, lon, tunit, wunit, self.REFRESH_INTERVAL)
 
+    # ------------------------------------------------------------------
     def render(self, draw: ImageDraw.ImageDraw, data: Any) -> None:
-        font     = self.get_font()
-        fmt      = self.config.get("format", "temp_cond")
-        tunit    = data.get("temp_unit", "°C")
-        wunit    = data.get("wind_unit", "kmh")
-        temp     = data.get("temp", "--")
-        cond     = data.get("condition", "")
-        cond_s   = data.get("cond_short", "")
-        wind     = data.get("wind_speed", "--")
-        hum      = data.get("humidity", "--")
+        font      = self.get_font()
+        lh        = _font_height(font)        # single-line pixel height
+        fmt       = self.config.get("format", "temp_cond")
+        tunit     = data.get("temp_unit", "°C")
+        wunit     = data.get("wind_unit", "kmh")
+        temp      = data.get("temp", "--")
+        cond      = data.get("condition", "")
+        cond_s    = data.get("cond_short", "")
+        wind      = data.get("wind_speed", "--")
+        hum       = data.get("humidity", "--")
+        wu_abbr   = "m" if wunit == "mph" else "k"   # short wind-unit letter
 
-        # Draw icon if room
+        # ── Icon ───────────────────────────────────────────────────────
         show_icon = self.config.get("show_icon", True)
-        tx = self.x
+        icon_w    = 0
         if show_icon and self.width > 24:
             from oled_dashboard.icons import draw_icon, icon_width as _iw
-            icon_size = min(self.height - 2, 12)
-            icon_y = self.y + max(0, (self.height - icon_size) // 2)
+            icon_size = min(self.height - 2, lh, 12)
+            icon_y    = self.y + max(0, (min(lh, self.height) - icon_size) // 2)
             draw_icon(draw, self.WIDGET_ID, self.x, icon_y, size=icon_size)
-            tx = self.x + _iw(icon_size)
+            icon_w = _iw(icon_size)
 
-        # Choose text based on format
+        text_x  = self.x + icon_w
+        avail_w = self.width - icon_w          # pixels available for text
+        avail_h = self.height                   # pixels available for text
+
+        # How many full text lines fit?
+        n_lines = max(1, avail_h // (lh + 1))
+
+        # ── Build content tokens based on format ───────────────────────
+        temp_str  = f"{temp}{tunit}"
+        wind_str  = f"↑{wind}{wu_abbr}"
+        hum_str   = f"{hum}%"
+        cond_full = cond
+        cond_abbr = cond_s
+
+        # ── Single-line mode ───────────────────────────────────────────
+        if n_lines == 1 or fmt == "temp_only":
+            if fmt == "temp_only":
+                text = temp_str
+            elif fmt == "compact":
+                text = f"{temp}° {cond_abbr}"
+            elif fmt == "full":
+                # Try progressively shorter versions
+                candidates = [
+                    f"{temp_str} {wind_str} {hum_str}",
+                    f"{temp_str} {wind_str}",
+                    f"{temp_str} {cond_abbr}",
+                    temp_str,
+                ]
+                text = next(
+                    (c for c in candidates if _measure_text(font, c) <= avail_w),
+                    temp_str
+                )
+            else:  # temp_cond
+                candidates = [
+                    f"{temp_str} {cond_full}",
+                    f"{temp_str} {cond_abbr}",
+                    temp_str,
+                ]
+                text = next(
+                    (c for c in candidates if _measure_text(font, c) <= avail_w),
+                    temp_str
+                )
+            _draw_text_wrapped(draw, text, font,
+                               text_x, self.y, avail_w, avail_h)
+            return
+
+        # ── Multi-line mode ────────────────────────────────────────────
+        # Build an ordered list of "rows" to display, then render each
+        # into one (or more) text lines using word-wrap.
         if fmt == "temp_only":
-            text = f"{temp}{tunit}"
-        elif fmt == "full":
-            wu = "m" if wunit == "mph" else "k"
-            text = f"{temp}{tunit} {wind}{wu} {hum}%"
+            rows = [temp_str]
         elif fmt == "compact":
-            text = f"{temp}° {cond_s}"
-        else:  # "temp_cond" (default)
-            text = f"{temp}{tunit} {cond}"
+            rows = [f"{temp}°", cond_abbr]
+        elif fmt == "full":
+            if n_lines >= 3:
+                rows = [temp_str, cond_full, f"{wind_str} {hum_str}"]
+            else:
+                rows = [f"{temp_str} {cond_abbr}", f"{wind_str} {hum_str}"]
+        else:  # temp_cond (default)
+            if n_lines >= 3:
+                rows = [temp_str, cond_full, f"{wind_str} {hum_str}"]
+            else:
+                rows = [temp_str, cond_full]
 
-        draw.text((tx, self.y), text, font=font, fill=255)
+        # Render rows with word-wrap; each row gets at most ceil(avail_h/n_rows) px
+        row_budget = avail_h // len(rows)   # px per logical row
+        cy = self.y
+        for row in rows:
+            if cy >= self.y + avail_h:
+                break
+            remaining_h = (self.y + avail_h) - cy
+            slot_h = min(row_budget, remaining_h)
+            _draw_text_wrapped(draw, row, font,
+                               text_x, cy, avail_w, slot_h)
+            cy += slot_h
 
 
 # ── Export ────────────────────────────────────────────────────────────────────
