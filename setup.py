@@ -23,14 +23,18 @@ setup(
     },
     python_requires=">=3.7",
     install_requires=[
+        # Core — always required
         "flask>=2.0",
         "Pillow>=9.0",
         "requests>=2.28",
-        "adafruit-circuitpython-ssd1306>=2.12",
-        "adafruit-blinka>=8.0",
-        "luma.oled>=3.8",
-        "luma.core>=2.3",
-        "RPi.GPIO>=0.7",
+        "psutil>=5.9",
+        # NOTE: Hardware-specific packages (RPi.GPIO, adafruit-blinka,
+        # adafruit-circuitpython-ssd1306, luma.oled, rpi_ws281x) are
+        # intentionally NOT listed here.  They require native build tools
+        # and pre-built kernel modules that may not be present on every
+        # Raspberry Pi OS / DietPi image.  install.sh installs them via
+        # apt (pre-compiled) and then pip, with graceful fallbacks.
+        # The dashboard runs fine in simulation/web-preview mode without them.
     ],
     extras_require={
         "dev": ["pytest", "black", "flake8"],

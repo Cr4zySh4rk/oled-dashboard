@@ -1,28 +1,27 @@
 # OLED Dashboard dependencies
-# Matches the proven working stack from OLED_Stats (mklements/OLED_Stats)
-
-# ── Core web server ────────────────────────────────────────────────────────────
+#
+# ── Always-required (pure Python, safe to pip-install everywhere) ──────────────
 flask>=2.0
-
-# ── Image rendering ────────────────────────────────────────────────────────────
-# NOTE: Pillow is also installed via apt (python3-pil) in install.sh
-# for best compatibility. This pip entry is a fallback.
 Pillow>=9.0
-
-# ── Primary OLED stack (same as OLED_Stats — confirmed working on Pi) ──────────
-# adafruit-blinka wraps Pi I2C/GPIO into CircuitPython-compatible API
-adafruit-blinka>=8.0
-# adafruit-circuitpython-ssd1306 drives the display using Blinka's I2C
-adafruit-circuitpython-ssd1306>=2.12
-
-# ── System stats ───────────────────────────────────────────────────────────────
 psutil>=5.9
-
-# ── Pi-hole integration ────────────────────────────────────────────────────────
-# Required for Pi-hole widget API calls (Pi-hole v6 session auth)
 requests>=2.28
 
-# ── Fallback OLED stack (used if adafruit/Blinka unavailable, e.g. DietPi) ────
-luma.oled>=3.8
-luma.core>=2.3
-smbus2>=0.4
+# ── Hardware-optional packages ─────────────────────────────────────────────────
+# These are installed by install.sh via apt first (pre-compiled binaries) and
+# then via pip only as a fallback.  Do NOT install this file directly on a Pi
+# without ensuring the system build tools + kernel headers are present, or use:
+#   pip install --no-deps -r requirements.txt
+# and rely on apt for the packages below.
+#
+# Primary OLED stack (adafruit-blinka wraps Pi I2C/GPIO):
+#   adafruit-blinka>=8.0
+#   adafruit-circuitpython-ssd1306>=2.12
+#
+# Fallback OLED stack (luma.oled, used when Blinka is unavailable e.g. DietPi):
+#   luma.oled>=3.8
+#   luma.core>=2.3
+#   smbus2>=0.4
+#
+# GPIO / LED (installed via apt as python3-rpi.gpio / python3-rpi-ws281x):
+#   RPi.GPIO>=0.7
+#   rpi_ws281x

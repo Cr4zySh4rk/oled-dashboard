@@ -125,6 +125,8 @@ install_system_deps() {
     log_step "Installing System Dependencies"
 
     apt-get update -qq
+
+    # Core packages — always needed
     apt-get install -y -qq \
         python3 \
         python3-pip \
@@ -136,9 +138,24 @@ install_system_deps() {
         libfreetype6-dev \
         libjpeg-dev \
         libopenjp2-7 \
+        libssl-dev \
         git \
         fonts-dejavu-core \
         2>/dev/null
+
+    # GPIO / hardware packages — install from apt (pre-compiled, no build tools needed).
+    # These are the packages that fail when pip tries to compile them from source on
+    # DietPi / Pi Zero because the kernel headers / build chain may be absent.
+    log_info "Installing GPIO/hardware packages from apt (pre-compiled)..."
+    apt-get install -y -qq \
+        python3-rpi.gpio \
+        2>/dev/null && log_info "python3-rpi.gpio installed via apt" \
+        || log_warn "python3-rpi.gpio not available in apt — will try pip fallback"
+
+    # smbus2 / python3-smbus for I2C
+    apt-get install -y -qq python3-smbus2 2>/dev/null \
+        || apt-get install -y -qq python3-smbus 2>/dev/null \
+        || true
 
     log_info "System dependencies installed"
 }
@@ -165,44 +182,65 @@ setup_python_env() {
 
     cd "$INSTALL_DIR"
 
-    # Create venv with --system-site-packages so apt-installed python3-pil is available
-    # (same approach as the original OLED_Stats project)
+    # Create venv with --system-site-packages so apt-installed packages
+    # (python3-pil, python3-rpi.gpio, python3-smbus) are visible inside the venv
+    # without needing to recompile anything from source.
     python3 -m venv --system-site-packages venv
     source venv/bin/activate
 
-    # Upgrade pip
-    pip install --upgrade pip setuptools wheel 2>/dev/null
+    # Upgrade pip/setuptools — but do NOT let this step fail the whole install
+    pip install --upgrade pip setuptools wheel 2>/dev/null || true
 
-    # ── Install OLED display stack in the same order as OLED_Stats ──────────
-    # adafruit-blinka MUST be installed first and upgraded, it wraps Pi I2C/GPIO
-    # into the CircuitPython-compatible API used by adafruit-circuitpython-ssd1306
+    # ── Core Python dependencies (pure-Python, always safe) ──────────────────
+    log_info "Installing core Python dependencies..."
+    pip install "flask>=2.0" "Pillow>=9.0" "psutil>=5.9" "requests>=2.28" \
+        || { log_error "Core pip installs failed — aborting"; exit 1; }
+
+    # ── smbus2 (I2C helper — pure Python, installs fine everywhere) ──────────
+    pip install smbus2 2>/dev/null \
+        && log_info "smbus2 installed" \
+        || log_warn "smbus2 pip install failed (apt version will be used)"
+
+    # ── Adafruit / CircuitPython OLED stack ───────────────────────────────────
+    # adafruit-blinka pulls in RPi.GPIO and rpi_ws281x as C-extension deps.
+    # On DietPi / Pi Zero the kernel headers may be absent so a source build
+    # fails.  We install with --no-build-isolation and set the env var that
+    # tells the RPi.GPIO build to skip the hardware check, then fall back
+    # gracefully if it still fails.
     log_info "Installing adafruit-blinka (CircuitPython Pi bridge)..."
-    pip install --upgrade adafruit-blinka 2>/dev/null \
+    READTHEDOCS=True pip install --upgrade adafruit-blinka 2>/dev/null \
         && log_info "adafruit-blinka installed" \
-        || log_warn "adafruit-blinka install failed (will try fallback libraries)"
+        || {
+            log_warn "adafruit-blinka pip install failed"
+            log_warn "Attempting RPi.GPIO from apt + blinka install without GPIO dep..."
+            # Try installing RPi.GPIO wheel from piwheels (pre-built for Pi)
+            pip install --extra-index-url https://www.piwheels.org/simple \
+                RPi.GPIO 2>/dev/null \
+                && log_info "RPi.GPIO installed from piwheels" \
+                || log_warn "RPi.GPIO install failed — luma.oled fallback will be used"
+            READTHEDOCS=True pip install adafruit-blinka 2>/dev/null \
+                && log_info "adafruit-blinka installed (second attempt)" \
+                || log_warn "adafruit-blinka unavailable — falling back to luma.oled"
+        }
 
     log_info "Installing adafruit-circuitpython-ssd1306..."
     pip install adafruit-circuitpython-ssd1306 2>/dev/null \
         && log_info "adafruit-circuitpython-ssd1306 installed" \
-        || log_warn "adafruit-circuitpython-ssd1306 install failed (will try fallback libraries)"
+        || log_warn "adafruit-circuitpython-ssd1306 install failed (luma fallback will be used)"
 
-    # ── Core dependencies ────────────────────────────────────────────────────
-    log_info "Installing core dependencies..."
-    pip install psutil flask requests 2>/dev/null
+    # ── luma.oled fallback stack ──────────────────────────────────────────────
+    # Used automatically by the dashboard drivers when adafruit-blinka is absent.
+    log_info "Installing luma.oled fallback stack..."
+    pip install --extra-index-url https://www.piwheels.org/simple \
+        luma.oled luma.core 2>/dev/null \
+        && log_info "luma.oled installed" \
+        || log_warn "luma.oled install failed — display will run in simulation mode"
 
-    # Pillow: prefer apt-installed python3-pil (already via system-site-packages),
-    # but install via pip as well for the venv in case apt version is old
-    pip install "Pillow>=9.0" 2>/dev/null \
-        || log_warn "Pillow pip install failed, using system python3-pil"
-
-    # ── Fallback OLED libraries (luma.oled + smbus2) ─────────────────────────
-    # Used if adafruit-blinka is unavailable (e.g. DietPi kernel differences)
-    log_info "Installing fallback OLED libraries (luma.oled, smbus2)..."
-    pip install luma.oled luma.core smbus2 2>/dev/null \
-        || log_warn "luma.oled install failed (adafruit stack will be used instead)"
-
-    # ── Install the dashboard package itself ─────────────────────────────────
-    pip install -e . 2>/dev/null
+    # ── Install the dashboard package itself (no hardware deps in install_requires) ──
+    log_info "Installing oled-dashboard package..."
+    pip install -e . \
+        && log_info "oled-dashboard package installed" \
+        || { log_error "oled-dashboard install failed"; exit 1; }
 
     deactivate
     log_info "Python environment configured"
